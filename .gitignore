@@ -1,47 +1,76 @@
-### Node / React (client)
+### Dependencies & build output
 client/node_modules/
 client/dist/
+client/dist-ssr/
 client/.vite/
 client/.turbo/
+node_modules/
+dist/
 
-# Local env and config
+### Environment & secrets (never commit)
+.env
+.env.*
+!.env.example
 client/.env
 client/.env.local
 client/.env.*.local
+ai-service/.env
+*.local
 
-# Logs
+### Node / npm / yarn / pnpm
 client/npm-debug.log*
 client/yarn-debug.log*
 client/yarn-error.log*
 client/pnpm-debug.log*
-
+client/lerna-debug.log*
+*.log
+.eslintcache
+*.tsbuildinfo
 
 ### Python / FastAPI (ai-service)
 ai-service/.venv/
+ai-service/venv/
 ai-service/__pycache__/
+ai-service/app/__pycache__/
 ai-service/*.py[cod]
+ai-service/*.pyo
 ai-service/.mypy_cache/
 ai-service/.pytest_cache/
+ai-service/.ruff_cache/
+ai-service/htmlcov/
+ai-service/.coverage
+ai-service/.coverage.*
+ai-service/coverage.xml
+ai-service/*.egg-info/
+ai-service/.eggs/
+ai-service/build/
+ai-service/dist/
 
-# SQLite db / local state
+### Local data & SQLite (runtime / dev state)
 ai-service/data/
 ai-service/*.db
+ai-service/*.sqlite
+ai-service/*.sqlite3
 ai-service/data.csv
 ai-service/test.py
 ai-service/test1.py
 
-# Local env
-ai-service/.env
+### OS
+.DS_Store
+.DS_Store?
+Thumbs.db
+Desktop.ini
 
-
-### OS / Editor junk
-*.log
-*.tmp
+### Editors & IDEs
+.vscode/*
+!.vscode/extensions.json
+.idea/
 *.swp
 *.swo
-*.pyc
-*.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+*.swn
+*~
 
+### Misc
+*.tmp
+*.temp
+*.bak
