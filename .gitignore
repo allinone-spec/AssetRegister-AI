@@ -1,42 +1,27 @@
 ### Node / React (client)
 client/node_modules/
 client/dist/
-client/dist-ssr/
 client/.vite/
 client/.turbo/
-client/coverage/
-client/.eslintcache
 
 # Local env and config
 client/.env
 client/.env.local
 client/.env.*.local
-client/*.local
 
 # Logs
 client/npm-debug.log*
 client/yarn-debug.log*
 client/yarn-error.log*
 client/pnpm-debug.log*
-client/lerna-debug.log*
+
 
 ### Python / FastAPI (ai-service)
 ai-service/.venv/
-ai-service/venv/
 ai-service/__pycache__/
-ai-service/**/__pycache__/
 ai-service/*.py[cod]
-ai-service/*$py.class
 ai-service/.mypy_cache/
 ai-service/.pytest_cache/
-ai-service/.ruff_cache/
-ai-service/htmlcov/
-ai-service/.coverage
-ai-service/.coverage.*
-ai-service/*.egg-info/
-ai-service/.eggs/
-ai-service/build/
-ai-service/dist/
 
 # SQLite db / local state
 ai-service/data/
@@ -44,36 +29,18 @@ ai-service/*.db
 ai-service/data.csv
 ai-service/test.py
 ai-service/test1.py
-ai-service/get-pip.py
 
 # Local env
 ai-service/.env
-ai-service/.env.*
 
-### Repo root (optional local files)
-.env
-.env.local
-.env.*.local
-*.pem
-*.key
 
-### OS / editor
+### OS / Editor junk
 *.log
 *.tmp
 *.swp
 *.swo
-*~
-.DS_Store
+*.DS_Store
 Thumbs.db
-Desktop.ini
-
-.vscode/*
-!.vscode/extensions.json
+.vscode/
 .idea/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
 
-# Cursor / local AI (uncomment if you do not want machine-specific paths in repo)
-# .cursor/
