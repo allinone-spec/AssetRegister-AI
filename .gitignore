@@ -39,6 +39,7 @@ ai-service/.env
 *.tmp
 *.swp
 *.swo
+*.pyc
 *.DS_Store
 Thumbs.db
 .vscode/
