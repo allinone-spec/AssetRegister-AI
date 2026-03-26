@@ -1,0 +1,1572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>AssetRegister — Enterprise Suite</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&family=DM+Mono:wght@400;500&display=swap"/>
+<style>
+/* ── Reset ── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);transition:background .3s,color .3s}
+
+/* ── CSS Variables ── */
+:root{
+  --a:#6f2fe1;
+  --ar:111;--ag:47;--ab:225;
+  --bg:#f7f5ff;--surface:#fff;--card:#fff;--nav:#fff;--input:#f8f6ff;
+  --text:#1a1028;--sub:#6b7280;--faint:#9ca3af;
+  --border:rgba(111,47,225,.12);--borderfaint:rgba(111,47,225,.07);
+  --shadow:0 2px 16px rgba(111,47,225,.07);
+  --adim:rgba(111,47,225,.09);--amid:rgba(111,47,225,.18);
+}
+body.dark{
+  --bg:#0e0e14;--surface:#17171f;--card:#1c1c27;--nav:#13131a;--input:#22222c;
+  --text:#f1f5f9;--sub:#94a3b8;--faint:#475569;
+  --border:rgba(111,47,225,.16);--borderfaint:rgba(255,255,255,.06);
+  --shadow:0 2px 12px rgba(0,0,0,.5);
+  --adim:rgba(111,47,225,.12);--amid:rgba(111,47,225,.22);
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-thumb{background:var(--amid);border-radius:99px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ── Keyframes ── */
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slideDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideRight{from{opacity:0;transform:translateX(10px)}to{opacity:1;transform:translateX(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes toastIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+
+/* ── Screens ── */
+.screen{display:none;height:100vh}
+.screen.active{display:flex}
+
+/* ══════════════════════════════════════════
+   LOGIN
+══════════════════════════════════════════ */
+#login-screen{flex-direction:row;background:var(--bg)}
+
+.login-left{
+  width:45%;flex-shrink:0;
+  background:linear-gradient(145deg,var(--a) 0%,color-mix(in srgb,var(--a) 75%,transparent) 50%,color-mix(in srgb,var(--a) 50%,transparent) 100%);
+  display:flex;flex-direction:column;justify-content:space-between;
+  padding:48px 52px;position:relative;overflow:hidden;
+}
+.login-blob{position:absolute;border-radius:50%;background:rgba(255,255,255,.07);pointer-events:none;filter:blur(1px)}
+.login-brand{position:relative;z-index:1}
+.login-logo{
+  display:flex;align-items:center;gap:12px;margin-bottom:56px;
+}
+.login-logo-icon{
+  width:42px;height:42px;border-radius:12px;
+  background:rgba(255,255,255,.2);backdrop-filter:blur(8px);
+  border:1px solid rgba(255,255,255,.3);
+  display:flex;align-items:center;justify-content:center;
+  font-weight:900;font-size:15px;color:#fff;
+}
+.login-logo-name{font-size:17px;font-weight:800;color:#fff;letter-spacing:-.5px}
+.login-logo-sub{font-size:11px;color:rgba(255,255,255,.65);letter-spacing:1px;text-transform:uppercase;font-weight:600}
+.login-headline{font-size:36px;font-weight:800;color:#fff;letter-spacing:-1.2px;line-height:1.15;margin-bottom:16px}
+.login-headline span{color:rgba(255,255,255,.75)}
+.login-desc{font-size:14px;color:rgba(255,255,255,.65);line-height:1.7;max-width:320px}
+.login-stats{position:relative;z-index:1}
+.login-stats-inner{
+  display:flex;background:rgba(255,255,255,.1);backdrop-filter:blur(10px);
+  border-radius:14px;border:1px solid rgba(255,255,255,.2);overflow:hidden;
+}
+.login-stat{flex:1;padding:16px 20px;border-right:1px solid rgba(255,255,255,.15)}
+.login-stat:last-child{border-right:none}
+.login-stat-val{font-size:22px;font-weight:800;color:#fff;letter-spacing:-.8px}
+.login-stat-lbl{font-size:11px;color:rgba(255,255,255,.6);font-weight:500;margin-top:2px}
+
+.login-right{
+  flex:1;display:flex;align-items:center;justify-content:center;padding:40px 60px;
+  background:var(--bg);transition:background .3s;
+}
+.login-form-wrap{width:100%;max-width:420px}
+.login-eyebrow{font-size:11px;font-weight:700;color:var(--a);text-transform:uppercase;letter-spacing:1.3px;margin-bottom:8px}
+.login-title{font-size:30px;font-weight:800;color:var(--text);letter-spacing:-.8px;margin-bottom:8px}
+.login-subtitle{font-size:14px;color:var(--faint);margin-bottom:36px}
+
+.login-error{
+  display:flex;align-items:center;gap:10px;
+  padding:11px 14px;border-radius:10px;margin-bottom:20px;
+  background:#fff5f5;border:1px solid #fecaca;color:#dc2626;
+  font-size:13px;font-weight:500;
+  animation:fadeIn .2s ease;
+}
+.login-error.hidden{display:none}
+
+.field-label{
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:12px;font-weight:700;color:var(--sub);
+  text-transform:uppercase;letter-spacing:.8px;margin-bottom:7px;
+}
+.field-label a{font-size:12px;color:var(--a);font-weight:600;background:none;border:none;cursor:pointer;font-family:inherit;text-transform:none;letter-spacing:0}
+.field-wrap{
+  display:flex;align-items:center;gap:12px;
+  background:var(--input);border:1.5px solid var(--border);
+  border-radius:11px;padding:11px 14px;
+  transition:border-color .2s,box-shadow .2s;
+}
+.field-wrap.focused{border-color:var(--a);box-shadow:0 0 0 3px var(--adim)}
+.field-wrap input{
+  flex:1;background:transparent;border:none;outline:none;
+  font-size:14px;color:var(--text);font-family:'DM Sans',sans-serif;
+}
+.field-wrap .field-icon{font-size:16px;color:var(--faint)}
+.field-wrap button{background:none;border:none;cursor:pointer;font-size:14px;color:var(--faint);padding:0;line-height:1}
+
+.remember-row{display:flex;align-items:center;gap:10px;cursor:pointer;margin:4px 0}
+.remember-row input{width:16px;height:16px;cursor:pointer;accent-color:var(--a)}
+.remember-row span{font-size:13px;color:var(--sub);font-weight:500}
+
+.btn-signin{
+  width:100%;padding:13px;
+  background:linear-gradient(135deg,var(--a),color-mix(in srgb,var(--a) 80%,transparent));
+  border:none;border-radius:11px;color:#fff;
+  font-size:14px;font-weight:700;cursor:pointer;
+  font-family:'DM Sans',sans-serif;
+  box-shadow:0 4px 16px var(--amid);
+  transition:opacity .2s;
+  display:flex;align-items:center;justify-content:center;gap:10px;
+  margin-top:4px;
+}
+.btn-signin:hover{opacity:.88}
+.btn-signin:disabled{opacity:.6;cursor:not-allowed}
+.spinner{
+  width:16px;height:16px;border-radius:50%;
+  border:2px solid rgba(255,255,255,.4);border-top-color:#fff;
+  animation:spin .7s linear infinite;display:inline-block;
+}
+
+.sso-divider{display:flex;align-items:center;gap:12px;margin:24px 0}
+.sso-divider hr{flex:1;border:none;border-top:1px solid var(--border)}
+.sso-divider span{font-size:11px;color:var(--faint);font-weight:600;white-space:nowrap}
+.sso-btns{display:flex;gap:10px}
+.sso-btn{
+  flex:1;padding:10px 8px;
+  background:var(--input);border:1.5px solid var(--border);
+  border-radius:10px;cursor:pointer;font-family:inherit;
+  font-size:12px;font-weight:600;color:var(--sub);
+  display:flex;align-items:center;justify-content:center;gap:7px;
+  transition:all .15s;
+}
+.sso-btn:hover{border-color:var(--a);color:var(--a)}
+.login-footer{text-align:center;font-size:12px;color:var(--faint);margin-top:28px}
+.login-footer a{color:var(--a);font-weight:700;cursor:pointer}
+
+/* ══════════════════════════════════════════
+   APP SHELL
+══════════════════════════════════════════ */
+#app-screen{flex-direction:column}
+
+/* Toast */
+#toast{
+  position:fixed;top:20px;right:24px;z-index:200;
+  display:flex;align-items:center;gap:10px;
+  padding:12px 18px;border-radius:12px;
+  font-size:13px;font-weight:600;
+  box-shadow:0 8px 24px rgba(0,0,0,.12);
+  animation:toastIn .25s ease;
+  pointer-events:none;
+}
+#toast.success{background:#f0fdf4;border:1px solid #bbf7d0;color:#059669}
+#toast.error{background:#fff5f5;border:1px solid #fecaca;color:#dc2626}
+#toast.hidden{display:none}
+
+/* Top Nav */
+#topnav{
+  height:56px;flex-shrink:0;display:flex;align-items:center;
+  padding:0 24px;background:var(--nav);border-bottom:1px solid var(--border);
+  box-shadow:var(--shadow);z-index:10;transition:background .3s;gap:0;
+}
+.brand{display:flex;align-items:center;gap:10px;margin-right:32px}
+.brand-icon{
+  width:32px;height:32px;border-radius:9px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-weight:900;font-size:12px;color:#fff;
+  background:linear-gradient(135deg,var(--a),color-mix(in srgb,var(--a) 80%,transparent));
+  box-shadow:0 3px 10px var(--amid);
+}
+.brand-name{font-size:14px;font-weight:800;color:var(--text);letter-spacing:-.4px;line-height:1.1}
+.brand-name span{color:var(--a)}
+.brand-tagline{font-size:9.5px;color:var(--faint);letter-spacing:1px;text-transform:uppercase;font-weight:600}
+
+.nav-links{display:flex;gap:1px;flex:1}
+.nav-link{
+  padding:6px 13px;background:transparent;border:none;border-radius:8px;
+  cursor:pointer;font-size:13px;font-weight:500;color:var(--sub);
+  font-family:inherit;transition:all .15s;position:relative;
+}
+.nav-link.active{font-weight:700;color:var(--a)}
+.nav-link.active::after{
+  content:'';position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);
+  width:18px;height:2.5px;background:var(--a);border-radius:99px;
+}
+
+.nav-right{display:flex;align-items:center;gap:9px}
+.search-pill{
+  display:flex;align-items:center;gap:9px;
+  padding:6px 13px 6px 10px;
+  background:var(--input);border:1px solid var(--border);border-radius:99px;
+  cursor:pointer;color:var(--faint);font-size:12.5px;font-family:inherit;
+  transition:all .2s;box-shadow:inset 0 1px 2px rgba(0,0,0,.04);
+}
+.search-pill:hover{border-color:var(--a)}
+.search-pill .kbd{
+  font-size:10px;padding:1px 6px;background:var(--adim);
+  color:var(--a);border-radius:5px;font-family:'DM Mono',monospace;font-weight:700;
+}
+.icon-btn{
+  width:34px;height:34px;border-radius:9px;border:1px solid var(--border);
+  background:var(--input);cursor:pointer;font-size:14px;
+  display:flex;align-items:center;justify-content:center;
+  transition:all .15s;color:var(--faint);position:relative;
+}
+.icon-btn:hover{border-color:var(--a);color:var(--a)}
+.icon-btn.active-btn{background:var(--adim);border-color:var(--a);color:var(--a)}
+.notif-dot{
+  position:absolute;top:7px;right:7px;width:7px;height:7px;
+  border-radius:50%;background:#ef4444;border:2px solid var(--nav);
+}
+.user-pill{
+  display:flex;align-items:center;gap:8px;
+  padding:4px 10px 4px 4px;
+  background:var(--input);border:1px solid var(--border);border-radius:99px;
+  cursor:pointer;transition:all .15s;
+}
+.user-pill:hover{border-color:var(--a)}
+.user-avatar{
+  width:26px;height:26px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:10px;font-weight:800;color:#fff;flex-shrink:0;
+  background:linear-gradient(135deg,var(--a),color-mix(in srgb,var(--a) 55%,transparent));
+}
+.user-name{font-size:12px;font-weight:700;color:var(--text);line-height:1.1}
+.user-role{font-size:10px;color:var(--faint)}
+.signout-arrow{font-size:10px;color:var(--faint);margin-left:2px}
+
+/* Settings Bar */
+#settings-bar{
+  background:var(--surface);border-bottom:1px solid var(--border);
+  padding:12px 24px;display:none;align-items:center;gap:24px;flex-shrink:0;
+  z-index:9;box-shadow:0 4px 20px var(--adim);transition:background .3s;
+  animation:slideDown .2s ease;
+}
+#settings-bar.open{display:flex}
+.settings-label{font-size:11px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:1px;white-space:nowrap}
+.swatches{display:flex;gap:5px;align-items:center}
+.swatch{
+  width:20px;height:20px;border-radius:50%;border:none;cursor:pointer;
+  transition:all .15s;box-shadow:none;transform:scale(1);
+}
+.swatch.active{transform:scale(1.25)}
+.hex-code{
+  font-size:11px;color:var(--faint);font-family:'DM Mono',monospace;
+  background:var(--adim);padding:2px 8px;border-radius:6px;font-weight:500;
+}
+.settings-divider{width:1px;height:30px;background:var(--border)}
+.mode-pill{
+  width:44px;height:24px;border-radius:99px;cursor:pointer;
+  position:relative;transition:background .25s;flex-shrink:0;
+  background:rgba(111,47,225,.15);
+}
+body.dark .mode-pill{background:var(--a)}
+.mode-thumb{
+  position:absolute;top:3px;left:3px;
+  width:18px;height:18px;border-radius:50%;background:#fff;
+  transition:left .25s;box-shadow:0 1px 4px rgba(0,0,0,.2);
+}
+body.dark .mode-thumb{left:23px}
+.mode-label{font-size:12.5px;color:var(--sub);font-weight:600}
+
+/* Command Palette */
+#cmd-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.4);
+  backdrop-filter:blur(5px);z-index:100;
+  display:none;align-items:flex-start;justify-content:center;padding-top:13vh;
+}
+#cmd-overlay.open{display:flex}
+#cmd-box{
+  width:560px;background:var(--surface);border-radius:16px;
+  border:1.5px solid var(--border);overflow:hidden;
+  box-shadow:0 28px 64px var(--amid);animation:slideDown .18s ease;
+}
+.cmd-header{
+  display:flex;align-items:center;gap:12px;
+  padding:14px 18px;border-bottom:1px solid var(--border);
+}
+.cmd-header input{
+  flex:1;background:transparent;border:none;outline:none;
+  font-size:15px;color:var(--text);font-family:'DM Sans',sans-serif;
+}
+#cmd-results{max-height:340px;overflow-y:auto}
+.cmd-item{
+  display:flex;align-items:center;gap:14px;padding:12px 18px;
+  border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;
+}
+.cmd-item:hover{background:var(--adim)}
+.cmd-icon{
+  width:36px;height:36px;border-radius:9px;background:var(--adim);
+  display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;
+}
+.cmd-info{flex:1}
+.cmd-name{font-size:13.5px;font-weight:700;color:var(--text)}
+.cmd-meta{font-size:11px;color:var(--faint);font-family:'DM Mono',monospace;margin-top:2px}
+.cmd-empty{padding:28px;text-align:center;color:var(--faint);font-size:13px}
+.cmd-footer{
+  padding:9px 18px;border-top:1px solid var(--border);
+  display:flex;gap:16px;align-items:center;
+}
+.cmd-hint{font-size:11px;color:var(--faint);display:flex;align-items:center;gap:5px}
+.cmd-hint kbd{
+  background:var(--adim);color:var(--a);padding:1px 6px;border-radius:4px;
+  font-family:'DM Mono',monospace;font-size:10px;font-weight:700;
+}
+
+/* Page body */
+#page-body{flex:1;overflow:hidden;display:flex}
+#page-content{flex:1;overflow-y:auto;padding:24px 28px}
+
+/* Pages */
+.page{display:none;padding-bottom:32px}
+.page.active{display:block}
+
+/* Coming soon */
+.coming-soon{
+  display:flex;flex-direction:column;align-items:center;
+  justify-content:center;height:60vh;gap:14px;
+}
+.cs-icon-wrap{
+  width:72px;height:72px;border-radius:20px;font-size:32px;
+  background:linear-gradient(135deg,var(--adim),rgba(111,47,225,.04));
+  border:1px solid rgba(0,0,0,.06);
+  display:flex;align-items:center;justify-content:center;
+}
+.cs-title{font-size:20px;font-weight:800;color:var(--text)}
+.cs-sub{font-size:13.5px;color:var(--faint)}
+
+/* Page header */
+.page-eyebrow{font-size:11px;font-weight:700;color:var(--a);text-transform:uppercase;letter-spacing:1.3px;margin-bottom:6px}
+.page-title{font-size:26px;font-weight:800;color:var(--text);letter-spacing:-.7px;margin:0 0 5px}
+.page-sub{font-size:13px;color:var(--faint)}
+
+/* Cards */
+.card{
+  background:var(--card);border-radius:14px;border:1px solid var(--border);
+  box-shadow:var(--shadow);transition:background .3s,border-color .3s;overflow:hidden;
+}
+.section-title{font-size:10.5px;font-weight:700;color:var(--a);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:6px}
+
+/* Stat cards grid */
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}
+.stat-card{padding:20px;position:relative;overflow:hidden}
+.stat-glow{
+  position:absolute;top:-20px;right:-20px;width:80px;height:80px;
+  border-radius:50%;background:var(--adim);pointer-events:none;
+}
+.stat-icon{font-size:22px;display:block;margin-bottom:12px}
+.stat-value{font-size:30px;font-weight:900;color:var(--text);letter-spacing:-1.5px;line-height:1;margin-bottom:4px}
+.stat-label{font-size:11.5px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px}
+.stat-footer{display:flex;align-items:center;justify-content:space-between}
+.stat-change{font-size:11px;font-weight:700}
+.stat-change.up{color:#059669}
+.stat-change.down{color:#dc2626}
+.stat-desc{font-size:10.5px;color:var(--faint)}
+
+/* Dashboard two-col */
+.dash-grid{display:grid;grid-template-columns:1fr 320px;gap:16px;margin-bottom:16px}
+
+/* Activity feed */
+.activity-item{
+  display:flex;align-items:center;gap:14px;padding:13px 20px;
+  border-bottom:1px solid var(--border);cursor:pointer;transition:background .12s;
+}
+.activity-item:last-child{border-bottom:none}
+.activity-item:hover{background:var(--adim)}
+.type-icon-badge{
+  width:38px;height:38px;border-radius:10px;flex-shrink:0;
+  background:var(--adim);border:1px solid var(--borderfaint);
+  display:flex;align-items:center;justify-content:center;font-size:16px;
+}
+.activity-info{flex:1;min-width:0}
+.activity-name{font-weight:700;font-size:13.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.activity-meta{font-size:11px;color:var(--faint);margin-top:2px;font-family:'DM Mono',monospace}
+.activity-count{font-size:13px;font-weight:700;color:var(--text);font-family:'DM Mono',monospace;min-width:56px;text-align:right;flex-shrink:0}
+
+/* Right col */
+.right-col{display:flex;flex-direction:column;gap:14px}
+.health-list{display:flex;flex-direction:column;gap:12px;margin-top:2px}
+.health-row{display:flex;align-items:center;gap:10px}
+.health-info{flex:1}
+.health-top{display:flex;justify-content:space-between;margin-bottom:5px}
+.health-name{font-size:12.5px;font-weight:700;color:var(--text)}
+.health-pct{font-size:11px;font-weight:700}
+.health-bar-bg{height:5px;background:var(--input);border-radius:99px;overflow:hidden;border:1px solid var(--border)}
+.health-bar{height:100%;border-radius:99px;transition:width .7s ease}
+
+/* Quick actions */
+.quick-card{
+  border-radius:14px;padding:18px;
+  position:relative;overflow:hidden;
+  background:linear-gradient(145deg,var(--a),color-mix(in srgb,var(--a) 75%,#000));
+  box-shadow:0 8px 24px var(--amid);
+}
+.quick-glow{position:absolute;border-radius:50%;background:rgba(255,255,255,.08);pointer-events:none}
+.quick-label{font-size:11px;font-weight:700;color:rgba(255,255,255,.65);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:12px;position:relative;z-index:1}
+.quick-actions-list{display:flex;flex-direction:column;gap:8px;position:relative;z-index:1}
+.quick-btn{
+  display:flex;align-items:center;gap:9px;
+  padding:9px 12px;background:rgba(255,255,255,.14);
+  border:1px solid rgba(255,255,255,.22);border-radius:9px;
+  color:rgba(255,255,255,.92);font-size:13px;font-weight:600;
+  cursor:pointer;text-align:left;font-family:inherit;transition:all .15s;
+}
+.quick-btn:hover{background:rgba(255,255,255,.24)}
+.quick-icon{font-size:15px}
+
+/* Source table */
+.source-table{width:100%;border-collapse:collapse}
+.source-table th{
+  text-align:left;padding:10px 16px;font-size:10.5px;
+  font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.8px;
+  border-bottom:1px solid var(--border);background:var(--input);
+}
+.source-table td{padding:11px 16px;border-bottom:1px solid var(--border)}
+.source-table tr:hover td{background:var(--adim)}
+.source-row-name{display:flex;align-items:center;gap:10px}
+.source-icon{
+  width:32px;height:32px;border-radius:8px;background:var(--adim);
+  display:flex;align-items:center;justify-content:center;font-size:14px;
+  border:1px solid var(--borderfaint);flex-shrink:0;
+}
+.source-name{font-weight:700;font-size:13.5px;color:var(--text)}
+.source-id{font-size:11px;color:var(--faint);font-family:'DM Mono',monospace}
+
+/* Status pills */
+.status-pill{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:3px 10px;border-radius:99px;font-size:11px;font-weight:700;
+  letter-spacing:.2px;white-space:nowrap;
+}
+.status-dot{width:5px;height:5px;border-radius:50%;display:inline-block;flex-shrink:0}
+
+/* Type badge */
+.type-badge{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:11.5px;font-weight:700;padding:3px 10px;
+  background:var(--adim);color:var(--a);border-radius:7px;
+  border:1px solid var(--amid);
+}
+
+/* Jobs page */
+.jobs-header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:20px}
+.jobs-title{font-size:26px;font-weight:800;color:var(--text);letter-spacing:-.7px;margin:0}
+.jobs-count{font-size:14px;font-weight:500;color:var(--faint);margin-left:10px}
+.view-switcher{
+  display:flex;background:var(--card);border:1px solid var(--border);
+  border-radius:9px;overflow:hidden;padding:3px;gap:2px;
+}
+.view-btn{
+  padding:5px 13px;border:none;border-radius:7px;
+  background:transparent;color:var(--faint);cursor:pointer;font-size:13px;transition:all .15s;
+}
+.view-btn.active{background:var(--a);color:#fff}
+.btn-primary{
+  padding:8px 18px;
+  background:linear-gradient(135deg,var(--a),color-mix(in srgb,var(--a) 85%,transparent));
+  border:none;border-radius:9px;color:#fff;font-size:13px;font-weight:700;
+  cursor:pointer;font-family:inherit;box-shadow:0 4px 14px var(--amid);transition:opacity .15s;
+}
+.btn-primary:hover{opacity:.88}
+
+.filter-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
+.filter-search{
+  display:flex;align-items:center;gap:10px;
+  background:var(--card);border:1px solid var(--border);
+  border-radius:99px;padding:7px 16px;flex:1;max-width:360px;box-shadow:var(--shadow);
+}
+.filter-search input{
+  background:transparent;border:none;outline:none;
+  color:var(--text);font-size:13px;flex:1;font-family:'DM Sans',sans-serif;
+}
+.filter-chip{
+  padding:6px 14px;border-radius:99px;font-size:12px;font-weight:700;
+  border:1px solid var(--border);background:transparent;color:var(--faint);
+  cursor:pointer;font-family:inherit;transition:all .15s;
+}
+
+/* Jobs table */
+.jobs-table-card{
+  background:var(--card);border-radius:14px;border:1px solid var(--border);
+  overflow:hidden;box-shadow:var(--shadow);transition:background .3s;
+}
+.jobs-table{width:100%;border-collapse:collapse}
+.jobs-table th{
+  text-align:left;padding:10px 14px;font-size:10.5px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.8px;
+  color:var(--faint);background:var(--input);border-bottom:1px solid var(--border);
+}
+.jobs-table td{
+  padding:11px 14px;vertical-align:middle;font-size:13.5px;
+  border-bottom:1px solid rgba(111,47,225,.05);color:var(--text);
+}
+.jobs-table tbody tr{cursor:pointer;transition:background .1s;border-left:3px solid transparent}
+.jobs-table tbody tr:hover{background:rgba(111,47,225,.04)}
+.jobs-table tbody tr.row-active{background:rgba(111,47,225,.06);border-left:3px solid var(--a)}
+.jobs-table tbody tr.row-sel{background:rgba(111,47,225,.04)}
+.job-name-cell{display:flex;align-items:center;gap:9px}
+.job-icon{
+  width:30px;height:30px;border-radius:8px;background:var(--adim);
+  display:flex;align-items:center;justify-content:center;
+  font-size:14px;border:1px solid var(--borderfaint);flex-shrink:0;
+}
+.job-name{font-weight:700;font-size:13.5px;color:var(--text)}
+.job-id-cell{font-size:11px;font-family:'DM Mono',monospace;color:var(--faint)}
+.mono{font-family:'DM Mono',monospace}
+.action-btns{display:flex;gap:5px}
+.action-btn{
+  width:28px;height:28px;background:transparent;
+  border-radius:7px;cursor:pointer;font-size:11px;
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.table-footer{
+  padding:11px 16px;border-top:1px solid var(--border);
+  display:flex;justify-content:space-between;align-items:center;
+}
+.pag-info{font-size:12px;color:var(--faint)}
+.pag-info .sel-count{color:var(--a);font-weight:700}
+.pag-btns{display:flex;gap:4px}
+.pag-btn{
+  padding:4px 11px;border-radius:7px;font-size:12px;background:transparent;
+  border:1.5px solid var(--border);color:var(--faint);cursor:pointer;font-family:inherit;transition:all .15s;
+}
+.pag-btn.active{background:var(--a);border-color:var(--a);color:#fff}
+
+/* Grid view */
+#grid-view{display:none;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+#grid-view.visible{display:grid}
+.grid-card{
+  background:var(--card);border-radius:14px;border:1.5px solid var(--border);
+  padding:18px;cursor:pointer;transition:all .18s;box-shadow:var(--shadow);
+}
+.grid-card:hover,.grid-card.active{border-color:var(--a)}
+.grid-card.active{box-shadow:0 4px 20px var(--amid)}
+.grid-card-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+.grid-type-icon{
+  width:36px;height:36px;border-radius:9px;background:var(--adim);
+  display:flex;align-items:center;justify-content:center;
+  font-size:16px;border:1px solid var(--borderfaint);
+}
+.grid-card-name{font-weight:800;font-size:14px;color:var(--text);margin-bottom:4px;letter-spacing:-.3px}
+.grid-card-meta{font-size:11px;color:var(--faint);font-family:'DM Mono',monospace;margin-bottom:12px}
+.grid-card-footer{display:flex;justify-content:space-between;align-items:center;font-size:12px}
+.grid-assets{font-weight:700;color:var(--text);font-family:'DM Mono',monospace}
+
+/* Job Drawer */
+#job-drawer{
+  width:0;flex-shrink:0;overflow:hidden;
+  background:var(--surface);border-left:1px solid var(--border);
+  transition:width .25s ease,background .3s;
+}
+#job-drawer.open{width:320px;overflow-y:auto;padding:20px}
+.drawer-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.drawer-eyebrow{font-size:11px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:1px}
+.close-btn{
+  width:28px;height:28px;border-radius:7px;border:1px solid var(--border);
+  background:transparent;cursor:pointer;color:var(--faint);font-size:14px;
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.close-btn:hover{border-color:var(--a)}
+.drawer-hero{
+  background:var(--adim);border-radius:12px;padding:16px;
+  margin-bottom:16px;border:1px solid var(--borderfaint);
+}
+.drawer-hero-top{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.drawer-type-icon{
+  width:38px;height:38px;border-radius:10px;background:var(--surface);
+  display:flex;align-items:center;justify-content:center;font-size:18px;
+  border:1px solid var(--border);flex-shrink:0;
+}
+.drawer-job-name{font-size:17px;font-weight:800;color:var(--text);letter-spacing:-.4px;margin-bottom:4px}
+.drawer-job-id{font-size:11px;color:var(--faint);font-family:'DM Mono',monospace}
+.drawer-tabs{
+  display:flex;background:var(--input);border-radius:9px;
+  padding:3px;gap:2px;margin-bottom:14px;
+}
+.drawer-tab{
+  flex:1;padding:6px 0;border-radius:7px;border:none;
+  background:transparent;color:var(--faint);
+  font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit;
+  text-transform:capitalize;transition:all .15s;
+}
+.drawer-tab.active{background:var(--a);color:#fff}
+.drawer-panel{display:none}
+.drawer-panel.active{display:block}
+.drawer-spark-card{
+  background:var(--card);border-radius:10px;padding:12px 14px;
+  margin-bottom:12px;border:1px solid var(--border);
+}
+.spark-label{font-size:10.5px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.spark-dates{display:flex;justify-content:space-between;margin-top:5px;font-size:10px;color:var(--faint)}
+.drawer-stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:14px}
+.drawer-stat{background:var(--input);border-radius:9px;padding:11px 12px;border:1px solid var(--border)}
+.drawer-stat-key{font-size:10px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px}
+.drawer-stat-val{font-size:13.5px;font-weight:700;color:var(--text);font-family:'DM Mono',monospace}
+.drawer-hist-item{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 12px;background:var(--input);border-radius:9px;
+  border:1px solid var(--border);margin-bottom:8px;
+}
+.drawer-hist-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.drawer-hist-info{flex:1}
+.drawer-hist-run{font-size:12px;font-weight:600;color:var(--text)}
+.drawer-hist-date{font-size:10.5px;color:var(--faint);font-family:'DM Mono',monospace;margin-top:2px}
+.drawer-config-item{
+  background:var(--input);border-radius:9px;padding:11px 12px;
+  border:1px solid var(--border);margin-bottom:9px;
+}
+.drawer-config-key{font-size:10px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px}
+.drawer-config-val{font-size:13px;font-weight:600;color:var(--text)}
+.drawer-actions{display:flex;flex-direction:column;gap:8px;margin-top:16px}
+.drawer-btn{
+  padding:10px;border-radius:10px;font-size:13.5px;font-weight:700;
+  cursor:pointer;font-family:inherit;transition:all .15s;
+}
+.drawer-btn-primary{
+  background:linear-gradient(135deg,var(--a),color-mix(in srgb,var(--a) 80%,transparent));
+  border:none;color:#fff;box-shadow:0 4px 14px var(--amid);
+}
+.drawer-btn-secondary{background:transparent;border:1.5px solid var(--border);color:var(--sub)}
+.drawer-btn-danger{background:transparent;border:1.5px solid #fee2e2;color:#dc2626}
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════
+     TOAST
+══════════════════════════════════════════════ -->
+<div id="toast" class="hidden"></div>
+
+<!-- ══════════════════════════════════════════════
+     LOGIN SCREEN
+══════════════════════════════════════════════ -->
+<div class="screen active" id="login-screen">
+  <div class="login-left">
+    <div class="login-blob" style="top:-80px;left:-80px;width:300px;height:300px"></div>
+    <div class="login-blob" style="bottom:60px;right:-60px;width:200px;height:200px"></div>
+    <div class="login-blob" style="bottom:-40px;left:auto;right:auto;left:40%;width:160px;height:160px"></div>
+
+    <div class="login-brand">
+      <div class="login-logo">
+        <div class="login-logo-icon">AR</div>
+        <div>
+          <div class="login-logo-name">AssetRegister</div>
+          <div class="login-logo-sub">Enterprise Suite</div>
+        </div>
+      </div>
+      <div class="login-headline">
+        Manage your<br/>
+        <span>digital assets</span><br/>
+        with confidence.
+      </div>
+      <p class="login-desc">Centralise, monitor, and automate all your enterprise asset imports across every integration in one place.</p>
+    </div>
+
+    <div class="login-stats">
+      <div class="login-stats-inner">
+        <div class="login-stat">
+          <div class="login-stat-val">6,314</div>
+          <div class="login-stat-lbl">Assets tracked</div>
+        </div>
+        <div class="login-stat">
+          <div class="login-stat-val">13</div>
+          <div class="login-stat-lbl">Integrations</div>
+        </div>
+        <div class="login-stat" style="border-right:none">
+          <div class="login-stat-val">99.2%</div>
+          <div class="login-stat-lbl">Uptime</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="login-right">
+    <div class="login-form-wrap">
+      <div class="login-eyebrow">Welcome back</div>
+      <h1 class="login-title">Sign in to your account</h1>
+      <p class="login-subtitle">Enter your credentials to access the dashboard.</p>
+
+      <div class="login-error hidden" id="login-error">
+        <span style="font-size:16px">⚠</span>
+        <span id="login-error-msg"></span>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <!-- Email -->
+        <div>
+          <div class="field-label"><span>Email address</span></div>
+          <div class="field-wrap" id="email-wrap">
+            <span class="field-icon">✉</span>
+            <input type="email" id="login-email" placeholder="you@company.com"
+              autocomplete="email"/>
+          </div>
+        </div>
+
+        <!-- Password -->
+        <div>
+          <div class="field-label">
+            <span>Password</span>
+            <a>Forgot password?</a>
+          </div>
+          <div class="field-wrap" id="pw-wrap">
+            <span class="field-icon">🔒</span>
+            <input type="password" id="login-pw" placeholder="Enter your password"/>
+            <button id="toggle-pw" title="Show/hide password">👁</button>
+          </div>
+        </div>
+
+        <!-- Remember -->
+        <label class="remember-row">
+          <input type="checkbox"/>
+          <span>Keep me signed in</span>
+        </label>
+
+        <!-- Submit -->
+        <button class="btn-signin" id="signin-btn">Sign in →</button>
+      </div>
+
+      <div class="sso-divider">
+        <hr/><span>OR CONTINUE WITH</span><hr/>
+      </div>
+      <div class="sso-btns">
+        <button class="sso-btn"><span>Ⓜ</span> Microsoft</button>
+        <button class="sso-btn"><span>G</span> Google</button>
+        <button class="sso-btn"><span>🔐</span> SAML SSO</button>
+      </div>
+      <p class="login-footer">Don't have an account? <a>Contact your admin</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     APP SCREEN
+══════════════════════════════════════════════ -->
+<div class="screen" id="app-screen">
+
+  <!-- Top Nav -->
+  <nav id="topnav">
+    <div class="brand">
+      <div class="brand-icon">AR</div>
+      <div>
+        <div class="brand-name">Asset<span>Register</span></div>
+        <div class="brand-tagline">Enterprise Suite</div>
+      </div>
+    </div>
+
+    <div class="nav-links">
+      <button class="nav-link active" data-page="dashboard">Dashboard</button>
+      <button class="nav-link" data-page="jobs">Jobs</button>
+      <button class="nav-link" data-page="integrations">Integrations</button>
+      <button class="nav-link" data-page="ar-rules">AR Rules</button>
+      <button class="nav-link" data-page="reports">Reports</button>
+      <button class="nav-link" data-page="settings">Settings</button>
+    </div>
+
+    <div class="nav-right">
+      <button class="search-pill" id="search-trigger">
+        <span>🔍</span>
+        <span>Search…</span>
+        <span class="kbd">⌘K</span>
+      </button>
+      <button class="icon-btn" id="dark-btn" title="Toggle theme">🌙</button>
+      <button class="icon-btn" id="settings-btn" title="Customise">⚙</button>
+      <button class="icon-btn" title="Notifications">
+        🔔<span class="notif-dot"></span>
+      </button>
+      <div class="user-pill" id="user-pill" title="Click to sign out">
+        <div class="user-avatar" id="user-avatar">AU</div>
+        <div>
+          <div class="user-name" id="user-name">Admin User</div>
+          <div class="user-role" id="user-role">Enterprise Admin</div>
+        </div>
+        <span class="signout-arrow">↗</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Settings Bar -->
+  <div id="settings-bar">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="settings-label">Accent colour</span>
+      <div class="swatches" id="swatches"></div>
+      <input type="color" id="color-picker" value="#6f2fe1"
+        style="width:28px;height:28px;border-radius:8px;border:1px solid var(--border);cursor:pointer;padding:2px;background:var(--input)"/>
+      <code class="hex-code" id="hex-code">#6f2fe1</code>
+    </div>
+    <div class="settings-divider"></div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="settings-label">Mode</span>
+      <div class="mode-pill" id="mode-pill"><div class="mode-thumb"></div></div>
+      <span class="mode-label" id="mode-label">Light</span>
+    </div>
+  </div>
+
+  <!-- Command Palette -->
+  <div id="cmd-overlay">
+    <div id="cmd-box">
+      <div class="cmd-header">
+        <span style="font-size:16px;color:var(--a)">🔍</span>
+        <input type="text" id="cmd-input" placeholder="Search jobs, integrations, status…"/>
+        <button id="cmd-close" style="padding:2px 10px;background:var(--adim);border:none;border-radius:99px;font-size:11px;color:var(--a);cursor:pointer;font-family:'DM Mono',monospace;font-weight:700">ESC</button>
+      </div>
+      <div id="cmd-results"></div>
+      <div class="cmd-footer">
+        <span class="cmd-hint"><kbd>↵</kbd> Select</span>
+        <span class="cmd-hint"><kbd>↑↓</kbd> Navigate</span>
+        <span class="cmd-hint"><kbd>ESC</kbd> Close</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Page Body -->
+  <div id="page-body">
+    <div id="page-content">
+
+      <!-- Dashboard -->
+      <div class="page active" id="page-dashboard">
+        <div style="margin-bottom:24px">
+          <div class="page-eyebrow">Overview</div>
+          <h1 class="page-title">Admin Dashboard</h1>
+          <p class="page-sub">Friday, 27 Feb 2025 · All systems nominal</p>
+        </div>
+
+        <!-- Stat cards -->
+        <div class="stat-grid">
+          <div class="card stat-card">
+            <div class="stat-glow"></div>
+            <span class="stat-icon">🖥️</span>
+            <div class="stat-value">6,314</div>
+            <div class="stat-label">Total Assets</div>
+            <div class="stat-footer">
+              <span class="stat-change up">▲ +4.2%</span>
+              <span class="stat-desc">Across all sources</span>
+            </div>
+          </div>
+          <div class="card stat-card">
+            <div class="stat-glow"></div>
+            <span class="stat-icon">⚡</span>
+            <div class="stat-value">7</div>
+            <div class="stat-label">Active Jobs</div>
+            <div class="stat-footer">
+              <span class="stat-change up">▲ +1</span>
+              <span class="stat-desc">Running or scheduled</span>
+            </div>
+          </div>
+          <div class="card stat-card">
+            <div class="stat-glow"></div>
+            <span class="stat-icon">⚠️</span>
+            <div class="stat-value">1</div>
+            <div class="stat-label">Failed Jobs</div>
+            <div class="stat-footer">
+              <span class="stat-change down">▼ -2</span>
+              <span class="stat-desc">Needs your attention</span>
+            </div>
+          </div>
+          <div class="card stat-card">
+            <div class="stat-glow"></div>
+            <span class="stat-icon">🔗</span>
+            <div class="stat-value">13</div>
+            <div class="stat-label">Integrations</div>
+            <div class="stat-footer">
+              <span class="stat-change up">▲ Stable</span>
+              <span class="stat-desc">Connected sources</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Main 2-col -->
+        <div class="dash-grid">
+          <!-- Activity -->
+          <div class="card">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)">
+              <div>
+                <div class="section-title">Recent Jobs</div>
+                <div style="font-size:18px;font-weight:800;color:var(--text);letter-spacing:-.5px;margin-top:2px">Import Activity</div>
+              </div>
+              <span id="activity-badge" style="font-size:11px;padding:3px 12px;background:var(--adim);color:var(--a);border-radius:99px;font-weight:700;border:1px solid var(--amid)">7 total</span>
+            </div>
+            <div id="activity-feed"></div>
+          </div>
+
+          <!-- Right col -->
+          <div class="right-col">
+            <div class="card" style="padding:18px;flex:1">
+              <div class="section-title">Integration Health</div>
+              <div class="health-list" id="health-list"></div>
+            </div>
+            <div class="quick-card">
+              <div class="quick-glow" style="top:-24px;right:-24px;width:100px;height:100px"></div>
+              <div class="quick-label">Quick Actions</div>
+              <div class="quick-actions-list">
+                <button class="quick-btn"><span class="quick-icon">⊕</span> New Import Job</button>
+                <button class="quick-btn"><span class="quick-icon">⊙</span> Upload Flat File</button>
+                <button class="quick-btn"><span class="quick-icon">↺</span> Re-run Failed</button>
+                <button class="quick-btn"><span class="quick-icon">⊞</span> Generate Report</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Source table -->
+        <div class="card">
+          <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+            <div class="section-title" style="margin-bottom:0">Top Asset Sources</div>
+            <span style="font-size:12px;font-weight:600;color:var(--a);cursor:pointer">View all →</span>
+          </div>
+          <table class="source-table">
+            <thead>
+              <tr><th>Source</th><th>Assets</th><th>Last Sync</th><th>Status</th><th>Trend</th></tr>
+            </thead>
+            <tbody id="source-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Jobs -->
+      <div class="page" id="page-jobs">
+        <div class="jobs-header">
+          <div>
+            <div class="page-eyebrow">Import Jobs</div>
+            <h1 class="jobs-title">All Jobs <span class="jobs-count">7 total</span></h1>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <div class="view-switcher">
+              <button class="view-btn active" data-view="table">☰</button>
+              <button class="view-btn" data-view="grid">⊞</button>
+            </div>
+            <button class="btn-primary" onclick="showToast('New job dialog would open here')">+ New Job</button>
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <div class="filter-search">
+            <span style="color:var(--faint);font-size:13px">🔍</span>
+            <input type="text" id="jobs-search" placeholder="Filter jobs…"/>
+          </div>
+          <button class="filter-chip active" data-filter="All">All</button>
+          <button class="filter-chip" data-filter="Success">Success</button>
+          <button class="filter-chip" data-filter="Running">Running</button>
+          <button class="filter-chip" data-filter="Failed">Failed</button>
+          <button class="filter-chip" data-filter="Pending">Pending</button>
+        </div>
+
+        <div id="table-view" class="jobs-table-card">
+          <table class="jobs-table">
+            <thead>
+              <tr>
+                <th style="width:44px"><input type="checkbox" id="select-all" style="cursor:pointer"/></th>
+                <th></th><th>Job</th><th>Integration</th><th>Status</th>
+                <th>Last Run</th><th>Assets</th><th>Duration</th><th>Trend</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="jobs-tbody"></tbody>
+          </table>
+          <div class="table-footer">
+            <span class="pag-info" id="pag-info">7 of 7 jobs</span>
+            <div class="pag-btns">
+              <button class="pag-btn">‹</button>
+              <button class="pag-btn active">1</button>
+              <button class="pag-btn">2</button>
+              <button class="pag-btn">›</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="grid-view"></div>
+      </div>
+
+      <!-- Other pages -->
+      <div class="page" id="page-integrations"><div class="coming-soon"><div class="cs-icon-wrap">🔗</div><div class="cs-title">Integrations</div><div class="cs-sub">This section is coming soon.</div></div></div>
+      <div class="page" id="page-ar-rules"><div class="coming-soon"><div class="cs-icon-wrap">📋</div><div class="cs-title">AR Rules</div><div class="cs-sub">This section is coming soon.</div></div></div>
+      <div class="page" id="page-reports"><div class="coming-soon"><div class="cs-icon-wrap">📊</div><div class="cs-title">Reports</div><div class="cs-sub">This section is coming soon.</div></div></div>
+      <div class="page" id="page-settings"><div class="coming-soon"><div class="cs-icon-wrap">⚙</div><div class="cs-title">Settings</div><div class="cs-sub">This section is coming soon.</div></div></div>
+    </div>
+
+    <!-- Job Drawer -->
+    <aside id="job-drawer">
+      <div class="drawer-header">
+        <span class="drawer-eyebrow">Job Detail</span>
+        <button class="close-btn" id="drawer-close">✕</button>
+      </div>
+      <div class="drawer-hero">
+        <div class="drawer-hero-top">
+          <div class="drawer-type-icon" id="drawer-icon"></div>
+          <div id="drawer-status-pill"></div>
+        </div>
+        <div class="drawer-job-name" id="drawer-name"></div>
+        <div class="drawer-job-id" id="drawer-id"></div>
+      </div>
+      <div class="drawer-tabs">
+        <button class="drawer-tab active" data-tab="info">Info</button>
+        <button class="drawer-tab" data-tab="history">History</button>
+        <button class="drawer-tab" data-tab="config">Config</button>
+      </div>
+
+      <!-- Info panel -->
+      <div class="drawer-panel active" id="drawer-info">
+        <div class="drawer-spark-card">
+          <div class="spark-label">7-day trend</div>
+          <svg id="drawer-spark" width="100%" height="44" viewBox="0 0 276 44" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="drawer-grad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#6f2fe1" stop-opacity="0.18"/>
+                <stop offset="100%" stop-color="#6f2fe1" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <polygon id="drawer-spark-area" fill="url(#drawer-grad)"/>
+            <polyline id="drawer-spark-line" fill="none" stroke="#6f2fe1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="spark-dates"><span>7d ago</span><span>Today</span></div>
+        </div>
+        <div class="drawer-stats-grid" id="drawer-stats"></div>
+      </div>
+
+      <!-- History panel -->
+      <div class="drawer-panel" id="drawer-history"></div>
+
+      <!-- Config panel -->
+      <div class="drawer-panel" id="drawer-config">
+        <div class="drawer-config-item"><div class="drawer-config-key">Schedule</div><div class="drawer-config-val">Every 6 hours</div></div>
+        <div class="drawer-config-item"><div class="drawer-config-key">Timeout</div><div class="drawer-config-val">30 minutes</div></div>
+        <div class="drawer-config-item"><div class="drawer-config-key">Retry attempts</div><div class="drawer-config-val">3</div></div>
+        <div class="drawer-config-item"><div class="drawer-config-key">Notification</div><div class="drawer-config-val">admin@company.com</div></div>
+        <div class="drawer-config-item"><div class="drawer-config-key">Last modified</div><div class="drawer-config-val">2025-02-20</div></div>
+      </div>
+
+      <div class="drawer-actions">
+        <button class="drawer-btn drawer-btn-primary" id="drawer-run">▶ Run Job Now</button>
+        <button class="drawer-btn drawer-btn-secondary">✎ Edit Configuration</button>
+        <button class="drawer-btn drawer-btn-danger" id="drawer-delete">✕ Delete Job</button>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     JAVASCRIPT
+══════════════════════════════════════════════ -->
+<script>
+/* ── Data ── */
+const JOBS = [
+  {id:"JOB-001",name:"Azure AD Sync",      type:"Azure AD",   status:"Success",lastRun:"2025-02-26 09:41",assets:1240,duration:"2m 14s",    trend:[60,72,68,80,75,90,88]},
+  {id:"JOB-002",name:"AWS EC2 Import",      type:"AWS",        status:"Running",lastRun:"2025-02-27 08:00",assets:856, duration:"In progress",trend:[40,55,50,62,58,70,65]},
+  {id:"JOB-003",name:"ServiceNow CMDB",     type:"ServiceNow", status:"Failed", lastRun:"2025-02-26 21:00",assets:0,   duration:"0m 43s",     trend:[80,70,60,40,20,10,5]},
+  {id:"JOB-004",name:"Flat File Assets Q1", type:"Flat File",  status:"Success",lastRun:"2025-02-25 14:22",assets:3400,duration:"5m 01s",    trend:[30,45,55,70,75,82,90]},
+  {id:"JOB-005",name:"Intune Device Sync",  type:"Intune",     status:"Success",lastRun:"2025-02-27 07:15",assets:620, duration:"1m 30s",    trend:[55,60,58,65,70,68,74]},
+  {id:"JOB-006",name:"MySQL Legacy DB",      type:"MySQL",      status:"Pending",lastRun:"—",               assets:0,   duration:"—",         trend:[0,0,0,0,0,0,0]},
+  {id:"JOB-007",name:"MS Defender Alerts",  type:"MS Defender",status:"Success",lastRun:"2025-02-27 06:00",assets:198, duration:"0m 55s",    trend:[45,50,60,55,65,70,72]},
+];
+const INTEGRATIONS = [
+  {name:"Azure AD",   health:98, color:"#7c3aed"},
+  {name:"AWS",        health:95, color:"#f59e0b"},
+  {name:"ServiceNow", health:42, color:"#ef4444"},
+  {name:"Intune",     health:100,color:"#10b981"},
+  {name:"MS Defender",health:87, color:"#6f2fe1"},
+  {name:"MySQL",      health:0,  color:"#94a3b8"},
+];
+const PRESETS = ["#6f2fe1","#2563eb","#0891b2","#059669","#d97706","#dc2626","#db2777","#0f172a"];
+const STATUS_META = {
+  Success:{fg:"#059669",bg:"#f0fdf4",border:"#bbf7d0"},
+  Running:{fg:"#6f2fe1",bg:"#faf5ff",border:"#e9d5ff"},
+  Failed: {fg:"#dc2626",bg:"#fff5f5",border:"#fecaca"},
+  Pending:{fg:"#d97706",bg:"#fffbeb",border:"#fde68a"},
+};
+const TYPE_ICONS = {"Azure AD":"☁️","AWS":"⚡","ServiceNow":"🔧","Flat File":"📄","Intune":"🛡️","MySQL":"🗄️","MS Defender":"🔒"};
+
+/* ── State ── */
+let accent = "#6f2fe1";
+let isDark = false;
+let activePage = "dashboard";
+let activeView = "table";
+let jobFilter = "All";
+let jobSearch = "";
+let selectedJob = null;
+let selectedRows = new Set();
+let drawerTab = "info";
+let loggedUser = null;
+
+/* ── Helpers ── */
+function hexToRgb(h){ return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)].join(",") }
+
+function setAccent(hex){
+  accent = hex;
+  const [r,g,b] = [parseInt(hex.slice(1,3),16),parseInt(hex.slice(3,5),16),parseInt(hex.slice(5,7),16)];
+  const root = document.documentElement;
+  root.style.setProperty("--a",hex);
+  root.style.setProperty("--ar",r); root.style.setProperty("--ag",g); root.style.setProperty("--ab",b);
+  root.style.setProperty("--adim",`rgba(${r},${g},${b},.09)`);
+  root.style.setProperty("--amid",`rgba(${r},${g},${b},.18)`);
+  root.style.setProperty("--border",isDark?`rgba(${r},${g},${b},.16)`:`rgba(${r},${g},${b},.12)`);
+  root.style.setProperty("--shadow",isDark?"0 2px 12px rgba(0,0,0,.5)":`0 2px 16px rgba(${r},${g},${b},.07)`);
+  document.getElementById("hex-code").textContent = hex;
+  document.getElementById("color-picker").value = hex;
+  // Update quick card gradient
+  document.querySelector(".quick-card").style.background =
+    `linear-gradient(145deg,${hex},color-mix(in srgb,${hex} 75%,#000))`;
+  // Update brand icon
+  document.querySelector(".brand-icon").style.background =
+    `linear-gradient(135deg,${hex},color-mix(in srgb,${hex} 80%,transparent))`;
+  document.querySelector(".brand-name span").style.color = hex;
+  // Re-render
+  renderAll();
+  if(selectedJob) openDrawer(selectedJob);
+}
+
+function statusPill(status){
+  const m = STATUS_META[status]||{fg:"#64748b",bg:"#f8fafc",border:"#e2e8f0"};
+  return `<span class="status-pill" style="color:${m.fg};background:${m.bg};border-color:${m.border}">
+    <span class="status-dot" style="background:${m.fg};box-shadow:0 0 4px ${m.fg}88"></span>${status}
+  </span>`;
+}
+
+function typeBadge(type){
+  return `<span class="type-badge">${TYPE_ICONS[type]||"📦"} ${type}</span>`;
+}
+
+function sparkSVG(trend, color, w=64, h=24){
+  const max = Math.max(...trend,1);
+  const line = trend.map((v,i)=>`${(i/(trend.length-1))*w},${h-(v/max)*(h-4)+2}`).join(" ");
+  const area = [...trend.map((v,i)=>`${(i/(trend.length-1))*w},${h-(v/max)*(h-4)+2}`),`${w},${h}`,`0,${h}`].join(" ");
+  const gid = `sg${color.replace("#","")}${w}`;
+  return `<svg width="${w}" height="${h}" style="display:block;flex-shrink:0">
+    <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${color}" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="${area}" fill="url(#${gid})"/>
+    <polyline points="${line}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+function donutSVG(pct, color, size=40){
+  const r=(size-7)/2, cx=size/2, cy=size/2;
+  const circ=2*Math.PI*r, dash=(pct/100)*circ;
+  return `<svg width="${size}" height="${size}" style="flex-shrink:0">
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="rgba(0,0,0,0.06)" stroke-width="6"/>
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="6"
+      stroke-dasharray="${dash} ${circ}" stroke-linecap="round"
+      transform="rotate(-90 ${cx} ${cy})"/>
+    <text x="${cx}" y="${cy+4}" text-anchor="middle" font-size="10" font-weight="700"
+      fill="${color}" font-family="DM Sans,sans-serif">${pct}%</text>
+  </svg>`;
+}
+
+function healthColor(pct){ return pct>80?"#059669":pct>40?"#d97706":"#ef4444"; }
+
+/* ── Toast ── */
+let toastTimer;
+function showToast(msg, type="success"){
+  const el = document.getElementById("toast");
+  el.className = type;
+  el.innerHTML = `<span style="font-size:16px">${type==="success"?"✓":"⚠"}</span> ${msg}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>el.className="hidden", 3000);
+}
+
+/* ── Render ── */
+function renderActivityFeed(){
+  const el = document.getElementById("activity-feed");
+  el.innerHTML = JOBS.map(j=>{
+    const m=STATUS_META[j.status];
+    return `<div class="activity-item" data-id="${j.id}">
+      <div class="type-icon-badge">${TYPE_ICONS[j.type]||"📦"}</div>
+      <div class="activity-info">
+        <div class="activity-name">${j.name}</div>
+        <div class="activity-meta">${j.id} · ${j.lastRun}</div>
+      </div>
+      ${sparkSVG(j.trend,m.fg)}
+      ${statusPill(j.status)}
+      <div class="activity-count">${j.assets>0?j.assets.toLocaleString():"—"}</div>
+    </div>`;
+  }).join("");
+  el.querySelectorAll(".activity-item").forEach(row=>{
+    row.addEventListener("click",()=>{
+      const j=JOBS.find(x=>x.id===row.dataset.id);
+      if(j){ selectedJob=j; setPage("jobs"); renderJobsTable(); renderJobsGrid(); openDrawer(j); }
+    });
+  });
+}
+
+function renderHealthList(){
+  document.getElementById("health-list").innerHTML = INTEGRATIONS.map(g=>{
+    const col=g.health>80?g.color:g.health>40?"#d97706":"#ef4444";
+    return `<div class="health-row">
+      ${donutSVG(g.health,col,40)}
+      <div class="health-info">
+        <div class="health-top">
+          <span class="health-name">${g.name}</span>
+          <span class="health-pct" style="color:${col}">${g.health}%</span>
+        </div>
+        <div class="health-bar-bg"><div class="health-bar" style="width:${g.health}%;background:${col}"></div></div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function renderSourceTable(){
+  const sorted = [...JOBS].filter(j=>j.assets>0).sort((a,b)=>b.assets-a.assets);
+  document.getElementById("source-tbody").innerHTML = sorted.map(j=>{
+    const m=STATUS_META[j.status];
+    return `<tr>
+      <td><div class="source-row-name">
+        <div class="source-icon">${TYPE_ICONS[j.type]||"📦"}</div>
+        <div><div class="source-name">${j.name}</div><div class="source-id">${j.id}</div></div>
+      </div></td>
+      <td style="font-weight:700;font-family:'DM Mono',monospace;font-size:13px;color:var(--text)">${j.assets.toLocaleString()}</td>
+      <td style="font-size:12px;color:var(--faint);font-family:'DM Mono',monospace">${j.lastRun}</td>
+      <td>${statusPill(j.status)}</td>
+      <td>${sparkSVG(j.trend,m.fg)}</td>
+    </tr>`;
+  }).join("");
+}
+
+function getFilteredJobs(){
+  return JOBS.filter(j=>
+    (jobFilter==="All"||j.status===jobFilter)&&
+    [j.name,j.type,j.status,j.id].some(v=>v.toLowerCase().includes(jobSearch.toLowerCase()))
+  );
+}
+
+function renderJobsTable(){
+  const jobs = getFilteredJobs();
+  const tbody = document.getElementById("jobs-tbody");
+  const allSel = jobs.length>0&&jobs.every(j=>selectedRows.has(j.id));
+  document.getElementById("select-all").checked = allSel;
+  document.getElementById("pag-info").innerHTML =
+    `${jobs.length} of ${JOBS.length} jobs${selectedRows.size>0?` <span class="sel-count">· ${selectedRows.size} selected</span>`:""}`;
+
+  tbody.innerHTML = jobs.map((j,i)=>{
+    const m=STATUS_META[j.status];
+    const sel=selectedRows.has(j.id);
+    const active=selectedJob?.id===j.id;
+    return `<tr data-id="${j.id}" class="${active?"row-active":sel?"row-sel":""}">
+      <td><input type="checkbox" ${sel?"checked":""} class="row-cb" data-id="${j.id}" style="cursor:pointer;accent-color:${accent}"/></td>
+      <td class="job-id-cell">${j.id}</td>
+      <td><div class="job-name-cell">
+        <div class="job-icon">${TYPE_ICONS[j.type]||"📦"}</div>
+        <span class="job-name">${j.name}</span>
+      </div></td>
+      <td>${typeBadge(j.type)}</td>
+      <td>${statusPill(j.status)}</td>
+      <td style="font-size:12px;color:var(--faint)" class="mono">${j.lastRun}</td>
+      <td style="font-weight:700" class="mono">${j.assets>0?j.assets.toLocaleString():"—"}</td>
+      <td style="font-size:12px;color:var(--faint)">${j.duration}</td>
+      <td>${sparkSVG(j.trend,m.fg)}</td>
+      <td><div class="action-btns">
+        <button class="action-btn act-run" data-id="${j.id}" data-name="${j.name}"
+          style="color:#059669;border:1.5px solid rgba(111,47,225,.12)">▶</button>
+        <button class="action-btn"
+          style="color:${accent};border:1.5px solid rgba(111,47,225,.12)">✎</button>
+        <button class="action-btn act-del" data-id="${j.id}" data-name="${j.name}"
+          style="color:#dc2626;border:1.5px solid rgba(111,47,225,.12)">✕</button>
+      </div></td>
+    </tr>`;
+  }).join("");
+
+  // Row click → drawer
+  tbody.querySelectorAll("tr[data-id]").forEach(row=>{
+    row.addEventListener("click",e=>{
+      if(e.target.type==="checkbox"||e.target.closest(".action-btns")) return;
+      const j=JOBS.find(x=>x.id===row.dataset.id);
+      if(!j) return;
+      if(selectedJob?.id===j.id){ selectedJob=null; closeDrawer(); }
+      else { selectedJob=j; openDrawer(j); }
+      renderJobsTable(); renderJobsGrid();
+    });
+  });
+  tbody.querySelectorAll(".row-cb").forEach(cb=>{
+    cb.addEventListener("change",e=>{ e.stopPropagation(); cb.checked?selectedRows.add(cb.dataset.id):selectedRows.delete(cb.dataset.id); renderJobsTable(); });
+  });
+  tbody.querySelectorAll(".act-run").forEach(btn=>{
+    btn.addEventListener("click",e=>{ e.stopPropagation(); showToast(`Running ${btn.dataset.name}…`); });
+  });
+  tbody.querySelectorAll(".act-del").forEach(btn=>{
+    btn.addEventListener("click",e=>{ e.stopPropagation(); showToast(`Deleted ${btn.dataset.name}`,"error"); });
+  });
+}
+
+function renderJobsGrid(){
+  const jobs=getFilteredJobs();
+  const grid=document.getElementById("grid-view");
+  grid.innerHTML = jobs.map(j=>{
+    const m=STATUS_META[j.status];
+    const active=selectedJob?.id===j.id;
+    return `<div class="grid-card${active?" active":""}" data-id="${j.id}">
+      <div class="grid-card-top">
+        <div class="grid-type-icon">${TYPE_ICONS[j.type]||"📦"}</div>
+        ${sparkSVG(j.trend,m.fg)}
+      </div>
+      <div class="grid-card-name">${j.name}</div>
+      <div class="grid-card-meta">${j.id} · ${j.type}</div>
+      <div class="grid-card-footer">
+        ${statusPill(j.status)}
+        <span class="grid-assets">${j.assets>0?j.assets.toLocaleString()+" assets":"—"}</span>
+      </div>
+    </div>`;
+  }).join("");
+  grid.querySelectorAll(".grid-card").forEach(card=>{
+    card.addEventListener("click",()=>{
+      const j=JOBS.find(x=>x.id===card.dataset.id);
+      if(!j) return;
+      if(selectedJob?.id===j.id){ selectedJob=null; closeDrawer(); }
+      else { selectedJob=j; openDrawer(j); }
+      renderJobsGrid(); renderJobsTable();
+    });
+  });
+}
+
+function renderCmdResults(q){
+  const jobs = q ? JOBS.filter(j=>[j.name,j.type,j.status,j.id].some(v=>v.toLowerCase().includes(q.toLowerCase()))) : JOBS;
+  const el=document.getElementById("cmd-results");
+  if(jobs.length===0){ el.innerHTML=`<div class="cmd-empty">No results for "${q}"</div>`; return; }
+  el.innerHTML = jobs.map(j=>`
+    <div class="cmd-item" data-id="${j.id}">
+      <div class="cmd-icon">${TYPE_ICONS[j.type]||"📦"}</div>
+      <div class="cmd-info">
+        <div class="cmd-name">${j.name}</div>
+        <div class="cmd-meta">${j.id} · ${j.type}</div>
+      </div>
+      ${statusPill(j.status)}
+      ${sparkSVG(j.trend,STATUS_META[j.status].fg,48,20)}
+    </div>`).join("");
+  el.querySelectorAll(".cmd-item").forEach(item=>{
+    item.addEventListener("click",()=>{
+      const j=JOBS.find(x=>x.id===item.dataset.id);
+      if(j){ selectedJob=j; openDrawer(j); setPage("jobs"); renderJobsTable(); renderJobsGrid(); }
+      closeCmdPalette();
+    });
+  });
+}
+
+function renderSwatches(){
+  const el=document.getElementById("swatches");
+  el.innerHTML = PRESETS.map(c=>`
+    <button class="swatch${accent===c?" active":""}" data-color="${c}"
+      style="background:${c};${accent===c?`box-shadow:0 0 0 2px var(--surface),0 0 0 4px ${c}`:""}" title="${c}"></button>
+  `).join("");
+  el.querySelectorAll(".swatch").forEach(s=>s.addEventListener("click",()=>setAccent(s.dataset.color)));
+}
+
+/* ── Drawer ── */
+function openDrawer(j){
+  const m=STATUS_META[j.status];
+  document.getElementById("drawer-icon").textContent = TYPE_ICONS[j.type]||"📦";
+  document.getElementById("drawer-status-pill").innerHTML = statusPill(j.status);
+  document.getElementById("drawer-name").textContent = j.name;
+  document.getElementById("drawer-id").textContent = j.id;
+
+  // Spark
+  const W=276,H=44,max=Math.max(...j.trend,1);
+  const linePts = j.trend.map((v,i)=>`${(i/(j.trend.length-1))*W},${H-(v/max)*(H-4)+2}`).join(" ");
+  const areaPts = [...j.trend.map((v,i)=>`${(i/(j.trend.length-1))*W},${H-(v/max)*(H-4)+2}`),`${W},${H}`,`0,${H}`].join(" ");
+  document.getElementById("drawer-spark-line").setAttribute("points",linePts);
+  document.getElementById("drawer-spark-line").setAttribute("stroke",m.fg);
+  document.getElementById("drawer-spark-area").setAttribute("points",areaPts);
+  document.querySelector("#drawer-spark defs stop:first-child").setAttribute("stop-color",m.fg);
+  document.querySelector("#drawer-spark defs stop:last-child").setAttribute("stop-color",m.fg);
+
+  document.getElementById("drawer-stats").innerHTML =
+    [["Assets",j.assets>0?j.assets.toLocaleString():"—"],["Duration",j.duration],["Type",j.type],["Last Run",j.lastRun]]
+    .map(([k,v])=>`<div class="drawer-stat">
+      <div class="drawer-stat-key">${k}</div>
+      <div class="drawer-stat-val" style="font-family:${k==="Type"?"'DM Sans',sans-serif":"'DM Mono',monospace"}">${v}</div>
+    </div>`).join("");
+
+  // History
+  document.getElementById("drawer-history").innerHTML =
+    [...Array(5)].map((_,i)=>`<div class="drawer-hist-item">
+      <div class="drawer-hist-dot" style="background:${i===2?"#dc2626":"#059669"}"></div>
+      <div class="drawer-hist-info">
+        <div class="drawer-hist-run">Run #${String(5-i).padStart(3,"0")}</div>
+        <div class="drawer-hist-date">2025-02-${27-i}</div>
+      </div>
+      ${statusPill(i===2?"Failed":"Success")}
+    </div>`).join("");
+
+  // Drawer action buttons
+  document.getElementById("drawer-run").onclick = ()=>showToast(`Running ${j.name}…`);
+  document.getElementById("drawer-delete").onclick = ()=>showToast(`Deleted ${j.name}`,"error");
+
+  document.getElementById("job-drawer").classList.add("open");
+  setDrawerTab("info");
+}
+
+function closeDrawer(){
+  document.getElementById("job-drawer").classList.remove("open");
+  selectedJob=null;
+}
+
+function setDrawerTab(tab){
+  drawerTab=tab;
+  document.querySelectorAll(".drawer-tab").forEach(t=>t.classList.toggle("active",t.dataset.tab===tab));
+  document.querySelectorAll(".drawer-panel").forEach(p=>p.classList.toggle("active",p.id===`drawer-${tab}`));
+}
+
+/* ── Page navigation ── */
+function setPage(page){
+  activePage=page;
+  document.querySelectorAll(".page").forEach(p=>p.classList.remove("active"));
+  const el=document.getElementById(`page-${page}`);
+  if(el) el.classList.add("active");
+  document.querySelectorAll(".nav-link").forEach(l=>l.classList.toggle("active",l.dataset.page===page));
+  if(page!=="jobs"){ selectedJob=null; closeDrawer(); }
+}
+
+/* ── Command palette ── */
+function openCmdPalette(){ document.getElementById("cmd-overlay").classList.add("open"); document.getElementById("cmd-input").value=""; renderCmdResults(""); setTimeout(()=>document.getElementById("cmd-input").focus(),40); }
+function closeCmdPalette(){ document.getElementById("cmd-overlay").classList.remove("open"); }
+
+/* ── Dark mode ── */
+function applyDark(dark){
+  isDark=dark;
+  document.body.classList.toggle("dark",dark);
+  document.getElementById("dark-btn").textContent=dark?"☀️":"🌙";
+  document.getElementById("mode-label").textContent=dark?"Dark":"Light";
+  setAccent(accent);
+}
+
+function renderAll(){
+  renderActivityFeed(); renderHealthList(); renderSourceTable();
+  renderJobsTable(); renderJobsGrid(); renderSwatches();
+  document.querySelector(".quick-card").style.background=
+    `linear-gradient(145deg,${accent},color-mix(in srgb,${accent} 75%,#000))`;
+}
+
+/* ── Events ── */
+// Login
+document.getElementById("signin-btn").addEventListener("click",async()=>{
+  const email=document.getElementById("login-email").value.trim();
+  const pw=document.getElementById("login-pw").value;
+  const errEl=document.getElementById("login-error");
+  const msgEl=document.getElementById("login-error-msg");
+  const btn=document.getElementById("signin-btn");
+  if(!email||!pw){ msgEl.textContent="Please enter your email and password."; errEl.classList.remove("hidden"); return; }
+  errEl.classList.add("hidden");
+  btn.disabled=true;
+  btn.innerHTML=`<span class="spinner"></span> Signing in…`;
+  await new Promise(r=>setTimeout(r,1400));
+  btn.disabled=false; btn.innerHTML="Sign in →";
+  if(pw==="wrong"){ msgEl.textContent="Invalid credentials. Please try again."; errEl.classList.remove("hidden"); return; }
+  // Login success
+  const name = email.split("@")[0].replace(/[._]/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+  loggedUser={name,email,role:"Enterprise Admin"};
+  document.getElementById("user-name").textContent=name||"Admin User";
+  document.getElementById("user-role").textContent="Enterprise Admin";
+  const initials=(name||"AU").split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase();
+  document.getElementById("user-avatar").textContent=initials;
+  document.getElementById("login-screen").classList.remove("active");
+  document.getElementById("app-screen").classList.add("active");
+  renderAll();
+});
+
+// Toggle PW
+document.getElementById("toggle-pw").addEventListener("click",()=>{
+  const inp=document.getElementById("login-pw");
+  const btn=document.getElementById("toggle-pw");
+  inp.type=inp.type==="password"?"text":"password";
+  btn.textContent=inp.type==="password"?"👁":"🙈";
+});
+
+// Field focus
+["email-wrap","pw-wrap"].forEach((id,i)=>{
+  const wrap=document.getElementById(id);
+  const inp=wrap.querySelector("input");
+  inp.addEventListener("focus",()=>wrap.classList.add("focused"));
+  inp.addEventListener("blur",()=>wrap.classList.remove("focused"));
+});
+
+// Nav links
+document.querySelectorAll(".nav-link").forEach(l=>l.addEventListener("click",()=>setPage(l.dataset.page)));
+
+// Dark
+document.getElementById("dark-btn").addEventListener("click",()=>applyDark(!isDark));
+document.getElementById("mode-pill").addEventListener("click",()=>applyDark(!isDark));
+
+// Settings bar
+document.getElementById("settings-btn").addEventListener("click",()=>{
+  const bar=document.getElementById("settings-bar");
+  const btn=document.getElementById("settings-btn");
+  bar.classList.toggle("open");
+  btn.classList.toggle("active-btn");
+});
+
+// Color picker
+document.getElementById("color-picker").addEventListener("input",e=>setAccent(e.target.value));
+
+// Search
+document.getElementById("search-trigger").addEventListener("click",openCmdPalette);
+document.getElementById("cmd-overlay").addEventListener("click",e=>{ if(e.target===e.currentTarget) closeCmdPalette(); });
+document.getElementById("cmd-close").addEventListener("click",closeCmdPalette);
+document.getElementById("cmd-input").addEventListener("input",e=>renderCmdResults(e.target.value));
+document.addEventListener("keydown",e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key==="k"){ e.preventDefault(); openCmdPalette(); }
+  if(e.key==="Escape") closeCmdPalette();
+});
+
+// Sign out
+document.getElementById("user-pill").addEventListener("click",()=>{
+  document.getElementById("app-screen").classList.remove("active");
+  document.getElementById("login-screen").classList.add("active");
+  selectedJob=null; selectedRows.clear(); closeDrawer();
+});
+
+// Drawer tabs
+document.querySelectorAll(".drawer-tab").forEach(t=>t.addEventListener("click",()=>setDrawerTab(t.dataset.tab)));
+document.getElementById("drawer-close").addEventListener("click",()=>{ closeDrawer(); renderJobsTable(); renderJobsGrid(); });
+
+// View switcher
+document.querySelectorAll(".view-btn").forEach(btn=>{
+  btn.addEventListener("click",()=>{
+    activeView=btn.dataset.view;
+    document.querySelectorAll(".view-btn").forEach(b=>b.classList.toggle("active",b===btn));
+    document.getElementById("table-view").style.display=activeView==="table"?"block":"none";
+    const gv=document.getElementById("grid-view");
+    gv.classList.toggle("visible",activeView==="grid");
+  });
+});
+
+// Filter chips
+document.querySelectorAll(".filter-chip").forEach(chip=>{
+  chip.addEventListener("click",()=>{
+    jobFilter=chip.dataset.filter;
+    document.querySelectorAll(".filter-chip").forEach(c=>{
+      const m=STATUS_META[c.dataset.filter]||{fg:"var(--a)",bg:"var(--adim)",border:"var(--amid)"};
+      const active=c.dataset.filter===jobFilter;
+      c.classList.toggle("active",active);
+      c.style.borderColor=active?m.fg:"var(--border)";
+      c.style.background=active?m.bg:"transparent";
+      c.style.color=active?m.fg:"var(--faint)";
+    });
+    renderJobsTable(); renderJobsGrid();
+  });
+});
+
+// Jobs search
+document.getElementById("jobs-search").addEventListener("input",e=>{ jobSearch=e.target.value; renderJobsTable(); renderJobsGrid(); });
+
+// Select all
+document.getElementById("select-all").addEventListener("change",e=>{
+  const jobs=getFilteredJobs();
+  if(e.target.checked) jobs.forEach(j=>selectedRows.add(j.id)); else selectedRows.clear();
+  renderJobsTable();
+});
+</script>
+</body>
+</html>
