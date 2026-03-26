@@ -1,10 +1,6 @@
-const PageLayout = ({ children, className = "" }) => {
-  // Destructuring the props here
+const PageLayout = ({ children, className = "", style }) => {
   return (
-    <div
-      className={`bg-white rounded-lg overflow-y-auto h-[100%] ${className}`}
-      // style={{ scrollbarWidth: "none" }}
-    >
+    <div className={`bg-white rounded-lg overflow-y-auto h-[100%] ${className}`} style={style}>
       {children}
     </div>
   );

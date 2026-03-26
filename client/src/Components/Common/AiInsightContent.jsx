@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
+import { exportToCSV } from "../../Utility/utilityFunction";
 import {
   IconButton,
   Menu,
@@ -10,6 +11,7 @@ import {
   DialogActions,
   Button,
   TextField,
+  CircularProgress,
 } from "@mui/material";
 const MoreVertIcon = (props) => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
@@ -74,9 +76,6 @@ function InsightFeedbackMenu({ insightId, insightType, onInsightFeedback, anchor
     if (feedbackType === "not_helpful") {
       setNotHelpfulOpen(true);
       return;
-    }
-    if (feedbackType === "irrelevant") {
-      toast.success("Hidden for this session.");
     }
     onInsightFeedback?.(insightId, insightType, feedbackType, undefined);
   };
@@ -156,6 +155,463 @@ const formatAxisLabel = (value, maxLength = 18) => {
   return `${text.slice(0, maxLength - 1)}...`;
 };
 
+const DRILL_GRID_CAP = 8000;
+
+/** Normalize cell values for table display and CSV (no React nodes). */
+const sanitizeRowsForDrill = (rows) => {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  return rows.map((r) => {
+    if (!r || typeof r !== "object") return { value: String(r) };
+    const o = {};
+    Object.keys(r).forEach((k) => {
+      let v = r[k];
+      if (v === null || v === undefined) {
+        o[k] = "";
+      } else if (typeof v === "object") {
+        try {
+          o[k] = JSON.stringify(v);
+        } catch {
+          o[k] = String(v);
+        }
+      } else {
+        o[k] = v;
+      }
+    });
+    return o;
+  });
+};
+
+/** Integer parsing safe for API counts (never NaN). */
+const safeInt = (v) => {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+  const n = parseInt(String(v ?? "").replace(/,/g, "").trim(), 10);
+  return Number.isFinite(n) ? n : 0;
+};
+
+/**
+ * Roll arbitrary ImportDataTracing statusCounts keys into stable buckets (API uses raw TracingStatus strings).
+ */
+const aggregateImportTracingStatusCounts = (statusCounts) => {
+  const buckets = {
+    matched: 0,
+    partiallyMatched: 0,
+    deleted: 0,
+    pending: 0,
+    other: 0,
+  };
+  if (!statusCounts || typeof statusCounts !== "object") {
+    return { ...buckets, totalFromBuckets: 0 };
+  }
+  let totalFromBuckets = 0;
+  for (const [rawKey, rawVal] of Object.entries(statusCounts)) {
+    const v = safeInt(rawVal);
+    totalFromBuckets += v;
+    const k = String(rawKey == null ? "" : rawKey).trim().toLowerCase();
+    if (
+      k === "matched" ||
+      k === "fully matched" ||
+      k === "full matched" ||
+      (k.includes("matched") && !k.includes("partial"))
+    ) {
+      buckets.matched += v;
+    } else if (k.includes("partial")) {
+      buckets.partiallyMatched += v;
+    } else if (k.includes("delet")) {
+      buckets.deleted += v;
+    } else if (
+      k === "null" ||
+      k === "" ||
+      k === "pending" ||
+      k === "none" ||
+      k.includes("pending") ||
+      k.includes("untrace")
+    ) {
+      buckets.pending += v;
+    } else {
+      buckets.other += v;
+    }
+  }
+  return { ...buckets, totalFromBuckets };
+};
+
+const TRACING_STATUS_KEYS = [
+  "TracingStatus",
+  "tracingStatus",
+  "TRACING_STATUS",
+  "ImportTracingStatus",
+  /** Job report grid (JobData_Rules / getAC|getDC data) */
+  "import_status_update",
+  "Import_Status_Update",
+  /** Register compare grid */
+  "RegisterTracingStatus",
+  "registerTracingStatus",
+];
+
+const findTracingStatusAccessor = (sampleRow) => {
+  if (!sampleRow || typeof sampleRow !== "object") return null;
+  for (const k of TRACING_STATUS_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(sampleRow, k)) return k;
+  }
+  const keys = Object.keys(sampleRow);
+  const compact = (s) => String(s || "").replace(/\s+/g, "");
+  const fuzzy = keys.find((key) =>
+    /importstatus|import_status|tracingstatus|registertracing|trace[_-]?status/i.test(compact(key)),
+  );
+  if (fuzzy) return fuzzy;
+  return keys.find((key) => /tracing\s*status|import.*trace.*status|trace\s*status/i.test(key)) || null;
+};
+
+const normalizeTracingCell = (val) => {
+  if (val === null || val === undefined || val === "") return "null";
+  return String(val).trim();
+};
+
+const rowMatchesTracingCategory = (cellNorm, category) => {
+  const k = cellNorm.toLowerCase();
+  if (category === "matched") {
+    return (
+      k === "matched" ||
+      k === "fully matched" ||
+      k === "full matched" ||
+      (k.includes("matched") && !k.includes("partial"))
+    );
+  }
+  if (category === "partiallyMatched") {
+    return k.includes("partial");
+  }
+  if (category === "deleted") {
+    return k.includes("delet");
+  }
+  if (category === "pending") {
+    return (
+      k === "null" ||
+      k === "" ||
+      k === "pending" ||
+      k === "none" ||
+      k.includes("pending") ||
+      k.includes("untrace")
+    );
+  }
+  return true;
+};
+
+const filterRowsByTracingCategory = (rows, category) => {
+  if (!category || !Array.isArray(rows) || rows.length === 0) return rows;
+  const acc = findTracingStatusAccessor(rows[0]);
+  if (!acc) return rows;
+  return rows.filter((r) => rowMatchesTracingCategory(normalizeTracingCell(r[acc]), category));
+};
+
+const resolveColumnAccessor = (sampleRow, colName) => {
+  if (!sampleRow || !colName) return null;
+  const keys = Object.keys(sampleRow);
+  const c = String(colName).trim();
+  if (!c) return null;
+  const exact = keys.find((k) => k === colName);
+  if (exact) return exact;
+  const tl = c.toLowerCase();
+  return keys.find((k) => k.toLowerCase() === tl) || keys.find((k) => k.toLowerCase().includes(tl)) || null;
+};
+
+/** Prefer rows with empty values in the insight column — never return the whole grid as a “column drill”. */
+const filterRowsForColumnInsight = (rows, colName) => {
+  if (!Array.isArray(rows) || rows.length === 0) return { rows: [], mode: "none" };
+  const acc = resolveColumnAccessor(rows[0], colName);
+  if (!acc) return { rows: [], mode: "none" };
+  const emptyish = rows.filter((r) => {
+    const v = r[acc];
+    return v === "" || v === null || v === undefined;
+  });
+  if (emptyish.length > 0) return { rows: emptyish, mode: "emptyInColumn" };
+  return { rows: [], mode: "noEmpty" };
+};
+
+const DRILL_STOPWORDS = new Set([
+  "this",
+  "that",
+  "with",
+  "from",
+  "have",
+  "been",
+  "were",
+  "will",
+  "your",
+  "their",
+  "data",
+  "rows",
+  "row",
+  "table",
+  "insight",
+  "analysis",
+  "should",
+  "could",
+  "would",
+  "about",
+  "which",
+  "there",
+  "these",
+  "those",
+  "other",
+  "into",
+  "than",
+  "then",
+  "such",
+  "most",
+  "more",
+  "some",
+  "many",
+  "much",
+  "very",
+  "when",
+  "where",
+  "what",
+  "make",
+  "like",
+  "also",
+  "only",
+  "just",
+  "based",
+  "using",
+  "used",
+  "across",
+  "report",
+  "register",
+  "original",
+  "source",
+  "resource",
+  "please",
+  "note",
+  "focus",
+  "review",
+  "check",
+  "ensure",
+  "summary",
+  "total",
+  "health",
+  "system",
+  "score",
+  "kpi",
+]);
+
+const DRILL_IGNORE_HEADER_KEYS = new Set(["history", "id", "key", "actions", "action"]);
+
+const tokenizeForDrillMatch = (text) =>
+  String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9%._-]+/g, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 4 && !DRILL_STOPWORDS.has(t));
+
+const findReferencedColumnKeys = (text, headers) => {
+  if (!text || !headers?.length) return [];
+  const lower = text.toLowerCase();
+  const sorted = [...new Set(headers)].sort((a, b) => String(b).length - String(a).length);
+  const hits = [];
+  for (const h of sorted) {
+    const hn = String(h).toLowerCase();
+    if (hn.length < 4 || DRILL_IGNORE_HEADER_KEYS.has(hn)) continue;
+    if (lower.includes(hn) || lower.includes(hn.replace(/_/g, " "))) hits.push(h);
+  }
+  return hits;
+};
+
+const filterRowsByInsightTextOverlap = (rows, title, extraHint, extraTokens = []) => {
+  const tokens = [
+    ...new Set([
+      ...tokenizeForDrillMatch(`${title || ""} ${extraHint || ""}`),
+      ...(extraTokens || []).map((t) => String(t).toLowerCase()).filter((t) => t.length >= 2),
+    ]),
+  ];
+  if (!tokens.length || !rows.length) return [];
+  const minHits = tokens.length === 1 ? 1 : 2;
+  const out = rows.filter((row) => {
+    const blob = JSON.stringify(row).toLowerCase();
+    let h = 0;
+    for (const t of tokens) {
+      if (blob.includes(t)) h++;
+    }
+    return h >= minHits;
+  });
+  if (!out.length || out.length > rows.length * 0.92) return [];
+  return out;
+};
+
+const filterRowsContainingKpiValue = (rows, value) => {
+  const s = String(value ?? "").trim();
+  if (s.length < 2) return [];
+  const sl = s.toLowerCase();
+  const out = rows.filter((r) => JSON.stringify(r).toLowerCase().includes(sl));
+  if (!out.length || out.length > rows.length * 0.92) return [];
+  return out;
+};
+
+/** Infer tracing drill filter from free text (KPIs, trends, cards). */
+const inferTracingDrillCategoryFromText = (text) => {
+  const t = String(text || "").toLowerCase();
+  if (/\bpartially\s*matched\b|\bpartial\s+match/.test(t)) return "partiallyMatched";
+  if (/\bdeleted\b/.test(t) && !/\bpartial/.test(t)) return "deleted";
+  if (/\bpending\b|\buntraced\b|\bnull\s*status\b|\buntrace/.test(t)) return "pending";
+  if (/\bmatched\b/.test(t) && !/\bpartial/.test(t)) return "matched";
+  return null;
+};
+
+const atAGlanceItemText = (item) =>
+  typeof item === "string" ? item : String(item?.text ?? "").trim();
+
+const atAGlanceTracingCategory = (item) =>
+  typeof item === "object" && item && item.tracingDrillCategory ? item.tracingDrillCategory : undefined;
+
+const atAGlanceAllowFullGrid = (item) =>
+  typeof item === "object" && item && item.allowFullGrid === true;
+
+/**
+ * Drill-down dialog: underlying rows (report grid and/or chart series) + CSV download.
+ */
+function InsightDrillDownModal({
+  open,
+  onClose,
+  title,
+  subtitle,
+  views,
+  truncatedNote,
+  loading = false,
+}) {
+  const [active, setActive] = useState(0);
+  React.useEffect(() => {
+    if (open) setActive(0);
+  }, [open, title, views]);
+
+  if (!open) return null;
+  if (loading) {
+    return (
+      <Dialog
+        open={open}
+        onClose={onClose}
+        maxWidth="sm"
+        fullWidth
+        scroll="paper"
+        slotProps={{
+          paper: { className: "rounded-2xl overflow-hidden border border-violet-100 shadow-xl" },
+        }}
+      >
+        <DialogTitle className="!text-base !font-semibold !pb-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white">
+          Loading data…
+        </DialogTitle>
+        <DialogContent className="flex flex-col items-center justify-center gap-4 py-12 bg-slate-50/50">
+          <CircularProgress size={40} sx={{ color: "#7c3aed" }} />
+          <div className="text-sm text-slate-600 text-center px-4 leading-relaxed max-w-xs">
+            Fetching rows for this drill-down. Large jobs may take a few seconds.
+          </div>
+        </DialogContent>
+        <DialogActions className="px-4 py-3 bg-white border-t border-slate-100">
+          <Button onClick={onClose} color="inherit" sx={{ textTransform: "none", fontWeight: 600 }}>
+            Cancel
+          </Button>
+        </DialogActions>
+      </Dialog>
+    );
+  }
+  if (!views?.length) return null;
+
+  const current = views[Math.min(active, views.length - 1)];
+  const rows = current?.rows || [];
+  const cols = rows.length ? Object.keys(rows[0]) : [];
+
+  const handleDownload = () => {
+    if (!rows.length) {
+      toast.error("Nothing to download.");
+      return;
+    }
+    const safeName = String(current?.label || "data")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    exportToCSV(`/ai-insight-drilldown/${safeName}`, rows);
+    toast.success("Download started.");
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      maxWidth="xl"
+      fullWidth
+      scroll="paper"
+      slotProps={{
+        paper: { className: "rounded-2xl overflow-hidden border border-slate-200/90 shadow-2xl" },
+      }}
+    >
+      <DialogTitle className="flex flex-col gap-1 !pb-3 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-violet-50/30">
+        <span className="text-base font-semibold text-slate-900 tracking-tight">{title || "Underlying data"}</span>
+        {subtitle && <span className="text-sm font-normal text-slate-600 leading-snug">{subtitle}</span>}
+        {truncatedNote && (
+          <span className="text-xs font-normal text-amber-900 bg-amber-50 border border-amber-200/80 rounded-lg px-2.5 py-1.5 w-fit mt-1 shadow-sm">
+            {truncatedNote}
+          </span>
+        )}
+      </DialogTitle>
+      <DialogContent dividers className="flex flex-col gap-3">
+        {views.length > 1 && (
+          <div className="flex flex-wrap gap-1.5">
+            {views.map((v, i) => (
+              <button
+                key={v.id}
+                type="button"
+                onClick={() => setActive(i)}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                  i === active
+                    ? "bg-violet-600 text-white border-violet-600"
+                    : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                {v.label}
+              </button>
+            ))}
+          </div>
+        )}
+        {!rows.length && (
+          <p className="text-sm text-gray-500">No rows to display for this view.</p>
+        )}
+        {rows.length > 0 && (
+          <div className="overflow-auto max-h-[55vh] rounded-lg border border-gray-200">
+            <table className="min-w-full text-xs text-left border-collapse">
+              <thead className="bg-slate-100 sticky top-0 z-10">
+                <tr>
+                  {cols.map((c) => (
+                    <th key={c} className="px-2 py-2 font-semibold text-gray-800 border-b border-gray-200 whitespace-nowrap">
+                      {c}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => (
+                  <tr key={ri} className={ri % 2 === 0 ? "bg-white" : "bg-slate-50/80"}>
+                    {cols.map((c) => (
+                      <td key={c} className="px-2 py-1.5 border-b border-gray-100 align-top max-w-[320px] break-words">
+                        {row[c] === null || row[c] === undefined ? "" : String(row[c])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </DialogContent>
+      <DialogActions className="px-4 py-2 gap-2">
+        <Button onClick={onClose} color="inherit">
+          Close
+        </Button>
+        <Button variant="contained" onClick={handleDownload} disabled={!rows.length}>
+          Download CSV (this view)
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 const getChartSeries = (chart) => {
   const firstSeries = Array.isArray(chart?.series) ? chart.series[0] : null;
   const values = Array.isArray(firstSeries?.values) ? firstSeries.values : [];
@@ -173,6 +629,39 @@ const buildChartRows = (chart) => {
     label: String(label ?? `Item ${index + 1}`),
     value: Number(values[index] ?? 0),
   }));
+};
+
+const chartSeriesToDrillRows = (chart) =>
+  buildChartRows(chart).map((row) => ({
+    Category: row.label,
+    Value: row.value,
+  }));
+
+const extractChartLabelTokens = (chart) => {
+  const out = [];
+  if (Array.isArray(chart?.xAxis)) {
+    chart.xAxis.forEach((x) => out.push(String(x).toLowerCase()));
+  }
+  const { labels } = getChartSeries(chart);
+  if (Array.isArray(labels)) {
+    labels.forEach((l) => out.push(String(l).toLowerCase()));
+  }
+  return [...new Set(out)].filter((s) => s.length >= 2);
+};
+
+const filterRowsMatchingChartTracing = (rows, chart) => {
+  if (!chart || !Array.isArray(rows) || rows.length === 0) return [];
+  const acc = findTracingStatusAccessor(rows[0]);
+  if (!acc) return [];
+  const labs = extractChartLabelTokens(chart);
+  if (!labs.length) return [];
+  const matched = rows.filter((r) => {
+    const cell = normalizeTracingCell(r[acc]).toLowerCase();
+    if (!cell || cell === "null") return false;
+    return labs.some((lab) => cell.includes(lab) || (lab.length > 3 && lab.includes(cell)));
+  });
+  if (!matched.length || matched.length > rows.length * 0.95) return [];
+  return matched;
 };
 
 const getEffectiveChartType = (chart) => {
@@ -313,15 +802,48 @@ const ChartRenderer = ({ chart, height: chartHeight = 260, compact = false }) =>
   );
 };
 
-const ChartCard = ({ chart, chartIndex, onInsightFeedback }) => {
+const ChartCard = ({ chart, chartIndex, onInsightFeedback, onDrillDown }) => {
   const { values } = getChartSeries(chart);
   if (!values.length) return null;
   const chartType = getEffectiveChartType(chart);
   // Use stable chart.id when available so backend can apply feedback correctly.
   const insightId = String(chart?.id ?? `chart-${chartIndex ?? 0}`);
+  const drillable = typeof onDrillDown === "function";
 
   return (
-    <div className="border rounded-xl p-5 bg-white space-y-4 shadow-sm min-w-0 overflow-hidden">
+    <div
+      role={drillable ? "button" : undefined}
+      tabIndex={drillable ? 0 : undefined}
+      onClick={
+        drillable
+          ? () =>
+              onDrillDown({
+                title: chart.title || chart.id || "Chart",
+                chart,
+                tracingDrillCategory:
+                  inferTracingDrillCategoryFromText(`${chart.title || ""} ${chart.id || ""}`) || undefined,
+              })
+          : undefined
+      }
+      onKeyDown={
+        drillable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onDrillDown({
+                  title: chart.title || chart.id || "Chart",
+                  chart,
+                  tracingDrillCategory:
+                    inferTracingDrillCategoryFromText(`${chart.title || ""} ${chart.id || ""}`) || undefined,
+                });
+              }
+            }
+          : undefined
+      }
+      className={`border rounded-xl p-5 bg-white space-y-4 shadow-sm min-w-0 overflow-hidden ${
+        drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/70 transition-shadow" : ""
+      }`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="font-semibold text-sm text-gray-900 break-words leading-5">
@@ -344,18 +866,30 @@ const ChartCard = ({ chart, chartIndex, onInsightFeedback }) => {
         <ChartRenderer chart={chart} height={260} />
       </div>
       <div className="text-xs text-gray-600 break-words leading-5">{getChartHighlight(chart)}</div>
+      {drillable && (
+        <div className="text-[11px] font-medium text-violet-700">Click to view chart values and report data</div>
+      )}
     </div>
   );
 };
 
 const sectionKeyByTone = { risk: "risk", positive: "positive", neutral: "recommendation" };
 
-const NarrativeBlock = ({ title, items, tone = "neutral", onInsightFeedback, hiddenInsightIds }) => {
+const NarrativeBlock = ({
+  title,
+  items,
+  tone = "neutral",
+  onInsightFeedback,
+  hiddenInsightIds,
+  onDrillDown,
+  reportRowsAvailable,
+}) => {
   const normalized = normalizeTextItems(items);
   if (!normalized.length) return null;
   const styles = toneStyles[tone] || toneStyles.neutral;
   const sectionKey = sectionKeyByTone[tone] || "narrative";
   const hidden = new Set(hiddenInsightIds || []);
+  const drillable = typeof onDrillDown === "function" && reportRowsAvailable;
   return (
     <div className={`border rounded-xl p-4 ${styles.wrapper} min-w-0`}>
       <h3 className={`font-semibold mb-2 text-sm ${styles.text}`}>{title}</h3>
@@ -364,7 +898,38 @@ const NarrativeBlock = ({ title, items, tone = "neutral", onInsightFeedback, hid
           const insightId = `${sectionKey}-${index}`;
           if (hidden.has(insightId)) return null;
           return (
-            <li key={`${title}-${index}`} className="break-words flex items-start justify-between gap-2">
+            <li
+              key={`${title}-${index}`}
+              className={`break-words flex items-start justify-between gap-2 rounded-md -mx-1 px-1 py-0.5 ${
+                drillable ? "cursor-pointer hover:bg-black/5" : ""
+              }`}
+              role={drillable ? "button" : undefined}
+              tabIndex={drillable ? 0 : undefined}
+              onClick={
+                drillable
+                  ? () =>
+                      onDrillDown({
+                        title: `${title} — item ${index + 1}`,
+                        extraHint: item.slice(0, 500),
+                        tracingDrillCategory: inferTracingDrillCategoryFromText(item),
+                      })
+                  : undefined
+              }
+              onKeyDown={
+                drillable
+                  ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onDrillDown({
+                          title: `${title} — item ${index + 1}`,
+                          extraHint: item.slice(0, 500),
+                          tracingDrillCategory: inferTracingDrillCategoryFromText(item),
+                        });
+                      }
+                    }
+                  : undefined
+              }
+            >
               <span>{item}</span>
               <InsightFeedbackMenu
                 insightId={insightId}
@@ -379,11 +944,29 @@ const NarrativeBlock = ({ title, items, tone = "neutral", onInsightFeedback, hid
   );
 };
 
-const MaturityCard = ({ maturityScore, onInsightFeedback }) => {
+const MaturityCard = ({ maturityScore, onInsightFeedback, onDrillDown, reportRowsAvailable }) => {
   if (!maturityScore) return null;
   const score = Number(maturityScore.score ?? 0);
+  const drillable = typeof onDrillDown === "function" && reportRowsAvailable;
   return (
-    <div className="border rounded-xl p-4 bg-gradient-to-r from-purple-50 to-blue-50 shadow-sm min-w-0 overflow-hidden">
+    <div
+      role={drillable ? "button" : undefined}
+      tabIndex={drillable ? 0 : undefined}
+      onClick={drillable ? () => onDrillDown({ title: "Maturity / system health", extraHint: maturityScore.comment }) : undefined}
+      onKeyDown={
+        drillable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onDrillDown({ title: "Maturity / system health", extraHint: maturityScore.comment });
+              }
+            }
+          : undefined
+      }
+      className={`border rounded-xl p-4 bg-gradient-to-r from-purple-50 to-blue-50 shadow-sm min-w-0 overflow-hidden ${
+        drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60" : ""
+      }`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="text-sm font-semibold mb-3 text-gray-900">System Health</div>
         <InsightFeedbackMenu insightId="maturity" insightType="maturity" onInsightFeedback={onInsightFeedback} />
@@ -400,21 +983,54 @@ const MaturityCard = ({ maturityScore, onInsightFeedback }) => {
   );
 };
 
-const AtAGlanceCard = ({ items, onInsightFeedback, hiddenInsightIds }) => {
+const AtAGlanceCard = ({ items, onInsightFeedback, hiddenInsightIds, onDrillDown, reportRowsAvailable }) => {
   if (!items?.length) return null;
   const hidden = new Set(hiddenInsightIds || []);
+  const drillable = typeof onDrillDown === "function" && reportRowsAvailable;
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm min-w-0 overflow-hidden">
       <ul className="space-y-2">
         {items.map((item, index) => {
           const insightId = `atAGlance-${index}`;
           if (hidden.has(insightId)) return null;
+          const lineText = atAGlanceItemText(item);
+          const traceCat = atAGlanceTracingCategory(item);
           return (
             <li
               key={`overview-${index}`}
-              className="text-sm text-gray-700 leading-6 border-l-4 border-purple-200 pl-3 break-words flex items-start justify-between gap-2"
+              role={drillable ? "button" : undefined}
+              tabIndex={drillable ? 0 : undefined}
+              onClick={
+                drillable
+                  ? () =>
+                      onDrillDown({
+                        title: `Trend / overview — ${index + 1}`,
+                        extraHint: lineText.slice(0, 500),
+                        tracingDrillCategory: traceCat,
+                        allowFullGrid: atAGlanceAllowFullGrid(item),
+                      })
+                  : undefined
+              }
+              onKeyDown={
+                drillable
+                  ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onDrillDown({
+                          title: `Trend / overview — ${index + 1}`,
+                          extraHint: lineText.slice(0, 500),
+                          tracingDrillCategory: traceCat,
+                          allowFullGrid: atAGlanceAllowFullGrid(item),
+                        });
+                      }
+                    }
+                  : undefined
+              }
+              className={`text-sm text-gray-700 leading-6 border-l-4 border-purple-200 pl-3 break-words flex items-start justify-between gap-2 rounded-r-md ${
+                drillable ? "cursor-pointer hover:bg-purple-50/50" : ""
+              }`}
             >
-              <span>{item}</span>
+              <span>{lineText}</span>
               <InsightFeedbackMenu
                 insightId={insightId}
                 insightType="atAGlance"
@@ -452,18 +1068,49 @@ const SeverityBadge = ({ severity }) => {
   );
 };
 
-const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds }) => {
+const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds, onDrillDown, reportRowsAvailable }) => {
   if (!Array.isArray(items) || items.length === 0) return null;
   const hidden = new Set(hiddenInsightIds || []);
+  const drillable = typeof onDrillDown === "function" && reportRowsAvailable;
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
       {items.map((item, index) => {
         const insightId = `totalInsight-${index}`;
         if (hidden.has(insightId)) return null;
+        const blob = `${item.title || ""} ${item.text || item.insight || ""}`;
+        const traceCat = inferTracingDrillCategoryFromText(blob);
         return (
           <div
             key={`${item.title || "total"}-${index}`}
-            className="border rounded-xl p-4 bg-white shadow-sm space-y-2 min-w-0 overflow-hidden"
+            role={drillable ? "button" : undefined}
+            tabIndex={drillable ? 0 : undefined}
+            onClick={
+              drillable
+                ? () =>
+                    onDrillDown({
+                      title: item.title || `Insight ${index + 1}`,
+                      extraHint: (item.text || item.insight || "").slice(0, 800),
+                      tracingDrillCategory: traceCat || undefined,
+                    })
+                : undefined
+            }
+            onKeyDown={
+              drillable
+                ? (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onDrillDown({
+                        title: item.title || `Insight ${index + 1}`,
+                        extraHint: (item.text || item.insight || "").slice(0, 800),
+                        tracingDrillCategory: traceCat || undefined,
+                      });
+                    }
+                  }
+                : undefined
+            }
+            className={`border rounded-xl p-4 bg-white shadow-sm space-y-2 min-w-0 overflow-hidden ${
+              drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60 transition-shadow" : ""
+            }`}
           >
             <div className="flex items-start justify-between gap-3">
               <div className="font-semibold text-sm text-gray-900 break-words min-w-0">
@@ -481,6 +1128,9 @@ const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds }) => {
             <div className="text-sm text-gray-700 leading-6 break-words">
               {item.text || item.insight}
             </div>
+            {drillable && (
+              <div className="text-[11px] font-medium text-violet-700 pt-1">Click for underlying data</div>
+            )}
           </div>
         );
       })}
@@ -488,20 +1138,70 @@ const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds }) => {
   );
 };
 
-const InsightList = ({ items, type = "column", onInsightFeedback, hiddenInsightIds }) => {
+const InsightList = ({
+  items,
+  type = "column",
+  onInsightFeedback,
+  hiddenInsightIds,
+  onDrillDown,
+  reportRowsAvailable,
+}) => {
   if (!Array.isArray(items) || items.length === 0) return null;
   const prefix = type === "column" ? "columnInsight" : "rowInsight";
   const hidden = new Set(hiddenInsightIds || []);
+  const drillable = typeof onDrillDown === "function" && reportRowsAvailable;
   return (
     <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
       <div className="max-h-[560px] overflow-auto divide-y divide-gray-100">
         {items.map((item, index) => {
           const insightId = `${prefix}-${index}`;
           if (hidden.has(insightId)) return null;
+          const head =
+            type === "column"
+              ? item.column || `Column ${index + 1}`
+              : item.issue || `Row insight ${index + 1}`;
           return (
             <div
               key={`${type}-${item.column || item.issue || "item"}-${index}`}
-              className="p-4 space-y-2"
+              role={drillable ? "button" : undefined}
+              tabIndex={drillable ? 0 : undefined}
+              onClick={
+                drillable
+                  ? () =>
+                      onDrillDown({
+                        title: head,
+                        extraHint: [item.insight || item.text, item.recommendation, item.operational_risk]
+                          .filter(Boolean)
+                          .join(" · ")
+                          .slice(0, 800),
+                        columnInsightKey: type === "column" ? item.column || null : null,
+                        tracingDrillCategory: inferTracingDrillCategoryFromText(
+                          `${item.insight || ""} ${item.text || ""} ${item.issue || ""}`
+                        ),
+                      })
+                  : undefined
+              }
+              onKeyDown={
+                drillable
+                  ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onDrillDown({
+                          title: head,
+                          extraHint: [item.insight || item.text, item.recommendation, item.operational_risk]
+                            .filter(Boolean)
+                            .join(" · ")
+                            .slice(0, 800),
+                          columnInsightKey: type === "column" ? item.column || null : null,
+                          tracingDrillCategory: inferTracingDrillCategoryFromText(
+                            `${item.insight || ""} ${item.text || ""} ${item.issue || ""}`
+                          ),
+                        });
+                      }
+                    }
+                  : undefined
+              }
+              className={`p-4 space-y-2 ${drillable ? "cursor-pointer hover:bg-slate-50/80" : ""}`}
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -538,6 +1238,9 @@ const InsightList = ({ items, type = "column", onInsightFeedback, hiddenInsightI
                   {item.recommendation}
                 </div>
               )}
+              {drillable && (
+                <div className="text-[11px] font-medium text-violet-700">Click for report data behind this insight</div>
+              )}
             </div>
           );
         })}
@@ -549,7 +1252,7 @@ const InsightList = ({ items, type = "column", onInsightFeedback, hiddenInsightI
 const filterChartsByScope = (charts = [], scope) =>
   charts.filter((chart) => (chart?.scope || "overview") === scope);
 
-const ChartGrid = ({ charts, onInsightFeedback }) => {
+const ChartGrid = ({ charts, onInsightFeedback, onDrillDown }) => {
   if (!Array.isArray(charts) || charts.length === 0) return null;
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
@@ -559,6 +1262,7 @@ const ChartGrid = ({ charts, onInsightFeedback }) => {
           chart={chart}
           chartIndex={idx}
           onInsightFeedback={onInsightFeedback}
+          onDrillDown={onDrillDown}
         />
       ))}
     </div>
@@ -609,7 +1313,7 @@ const pickImportTracingRelatedInsights = (aiResult) => {
 };
 
 /** API summary rows: statuses, time range, sample keys (from AI service importTracing). */
-const ImportTracingSummaryPanel = ({ tracing, onInsightFeedback, hiddenInsightIds }) => {
+const ImportTracingSummaryPanel = ({ tracing, onInsightFeedback, hiddenInsightIds, onDrillDown }) => {
   if (!tracing || typeof tracing !== "object") return null;
   const hidden = new Set(hiddenInsightIds || []);
   const total = Number(tracing.totalRows) || 0;
@@ -680,8 +1384,38 @@ const ImportTracingSummaryPanel = ({ tracing, onInsightFeedback, hiddenInsightId
             {examples.slice(0, 6).map((ex, i) => {
               const exId = `importTracing-example-${i}`;
               if (hidden.has(exId)) return null;
+              const drillable = typeof onDrillDown === "function";
               return (
-                <li key={exId} className="border-l-2 border-purple-200 pl-2 break-all flex items-start justify-between gap-2">
+                <li
+                  key={exId}
+                  role={drillable ? "button" : undefined}
+                  tabIndex={drillable ? 0 : undefined}
+                  onClick={
+                    drillable
+                      ? () =>
+                          onDrillDown({
+                            title: `Import tracing sample #${ex.numberID ?? i}`,
+                            exampleRow: ex,
+                          })
+                      : undefined
+                  }
+                  onKeyDown={
+                    drillable
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            onDrillDown({
+                              title: `Import tracing sample #${ex.numberID ?? i}`,
+                              exampleRow: ex,
+                            });
+                          }
+                        }
+                      : undefined
+                  }
+                  className={`border-l-2 border-purple-200 pl-2 break-all flex items-start justify-between gap-2 rounded ${
+                    drillable ? "cursor-pointer hover:bg-purple-50/60" : ""
+                  }`}
+                >
                   <span className="min-w-0">
                     #{ex.numberID ?? i} · {String(ex.TracingStatus ?? "null")} · AC {ex.ACtableName || "—"} / DC{" "}
                     {ex.DCtableName || "—"}
@@ -1217,11 +1951,212 @@ const RegisterCompareMultiTablePanel = ({ registerTracing, onInsightFeedback, hi
   );
 };
 
-const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathname = "" }) => {
+const AiInsightContent = ({
+  aiResult,
+  onInsightFeedback,
+  hiddenInsightIds,
+  pathname = "",
+  drillDown = null,
+}) => {
   if (!aiResult) return null;
 
   /** Empty = show all sections. Non-empty = show only listed sections (focus / isolate). */
   const [focusedSections, setFocusedSections] = useState([]);
+  const [drillModal, setDrillModal] = useState(null);
+  /** Auto-dismissing modal when drill-down cannot map the card to report rows (replaces toast for this path). */
+  const [drillMapNotice, setDrillMapNotice] = useState(null);
+  useEffect(() => {
+    if (!drillMapNotice) return undefined;
+    const t = window.setTimeout(() => setDrillMapNotice(null), 6500);
+    return () => window.clearTimeout(t);
+  }, [drillMapNotice]);
+  /** Avoid re-fetching `loadAllRows()` on every drill click until the page table reloads. */
+  const fullDrillRowsCacheRef = useRef(null);
+  useEffect(() => {
+    fullDrillRowsCacheRef.current = null;
+  }, [drillDown?.rows]);
+
+  const gridRows = useMemo(
+    () => sanitizeRowsForDrill((drillDown?.rows || []).slice(0, DRILL_GRID_CAP)),
+    [drillDown?.rows]
+  );
+  const reportRowsAvailable = gridRows.length > 0 || Boolean(drillDown?.loadAllRows);
+
+  const openInsightDrillDown = useCallback(
+    async ({
+      title,
+      extraHint,
+      chart,
+      exampleRow,
+      tracingDrillCategory,
+      columnInsightKey,
+      allowFullGrid = false,
+      kpiValue,
+    }) => {
+      const subtitle = [drillDown?.caption, extraHint].filter(Boolean).join(" · ") || undefined;
+      if (drillDown?.loadAllRows) {
+        setDrillModal({
+          open: true,
+          loading: true,
+          title: title || "Underlying data",
+          subtitle,
+          views: [],
+          truncatedNote: undefined,
+        });
+      }
+
+      let baseRows = gridRows;
+      if (drillDown?.loadAllRows) {
+        const cached = fullDrillRowsCacheRef.current;
+        if (Array.isArray(cached) && cached.length) {
+          baseRows = cached;
+        } else {
+          try {
+            const full = await drillDown.loadAllRows();
+            const sanitized = sanitizeRowsForDrill((full || []).slice(0, DRILL_GRID_CAP));
+            if (sanitized.length) {
+              baseRows = sanitized;
+              fullDrillRowsCacheRef.current = sanitized;
+            }
+          } catch (e) {
+            console.error(e);
+            toast.error("Could not load the full dataset for drill-down. Try the main grid export.");
+          }
+        }
+      }
+
+      const views = [];
+      if (chart) {
+        const s = chartSeriesToDrillRows(chart);
+        if (s.length) views.push({ id: "chart-series", label: "Chart values", rows: s });
+      }
+      if (exampleRow && typeof exampleRow === "object" && Object.keys(exampleRow).length) {
+        views.push({
+          id: "trace-sample",
+          label: "Tracing sample row",
+          rows: sanitizeRowsForDrill([exampleRow]),
+        });
+      }
+
+      const insightBlob = `${title || ""} ${extraHint || ""}`;
+      let reportSlice = [];
+      let reportLabel = "";
+
+      if (baseRows.length) {
+        const effTracing = tracingDrillCategory || inferTracingDrillCategoryFromText(insightBlob);
+        let effColumn = columnInsightKey;
+        if (!effColumn) {
+          const colHits = findReferencedColumnKeys(insightBlob, Object.keys(baseRows[0]));
+          if (colHits.length) effColumn = colHits[0];
+        }
+
+        const chartTraceRows = chart ? filterRowsMatchingChartTracing(baseRows, chart) : [];
+        if (chartTraceRows.length) {
+          reportSlice = chartTraceRows;
+          const acc = findTracingStatusAccessor(baseRows[0]);
+          reportLabel = `${acc || "Status"} — rows matching chart (${chartTraceRows.length.toLocaleString()})`;
+        } else if (effTracing) {
+          const statusAcc = findTracingStatusAccessor(baseRows[0]);
+          if (!statusAcc) {
+            toast.error(
+              "No import/tracing status column found in the dataset (expected e.g. import_status_update or TracingStatus). Check column names or refresh.",
+            );
+          } else {
+            const traced = filterRowsByTracingCategory(baseRows, effTracing);
+            if (traced.length > 0) {
+              reportSlice = traced;
+              const human =
+                effTracing === "partiallyMatched"
+                  ? "Partially matched"
+                  : effTracing === "pending"
+                    ? "Pending / untraced"
+                    : effTracing.charAt(0).toUpperCase() + effTracing.slice(1);
+              reportLabel = `${statusAcc} — ${human} (${traced.length.toLocaleString()} rows)`;
+            } else {
+              toast.error("No rows match this status filter in the loaded dataset.");
+            }
+          }
+        } else if (effColumn) {
+          const { rows: colRows, mode } = filterRowsForColumnInsight(baseRows, effColumn);
+          if (mode === "emptyInColumn" && colRows.length) {
+            reportSlice = colRows;
+            reportLabel = `Rows with empty “${effColumn}” (${colRows.length.toLocaleString()})`;
+          } else {
+            const narrowed = filterRowsByInsightTextOverlap(
+              baseRows,
+              title,
+              `${extraHint || ""} ${effColumn}`,
+              [],
+            );
+            if (narrowed.length) {
+              reportSlice = narrowed;
+              reportLabel = `Rows matching insight (column “${effColumn}”) (${narrowed.length.toLocaleString()})`;
+            }
+          }
+        }
+
+        if (
+          !reportSlice.length &&
+          kpiValue !== undefined &&
+          kpiValue !== null &&
+          String(kpiValue).trim() !== ""
+        ) {
+          const byVal = filterRowsContainingKpiValue(baseRows, kpiValue);
+          if (byVal.length) {
+            reportSlice = byVal;
+            reportLabel = `Rows containing KPI display value (${byVal.length.toLocaleString()})`;
+          }
+        }
+
+        if (!reportSlice.length) {
+          const chartTok = chart ? extractChartLabelTokens(chart) : [];
+          const narrowed = filterRowsByInsightTextOverlap(baseRows, title, extraHint, chartTok);
+          if (narrowed.length) {
+            reportSlice = narrowed;
+            reportLabel = `Rows matching insight text (${narrowed.length.toLocaleString()})`;
+          }
+        }
+
+        if (!reportSlice.length && allowFullGrid) {
+          reportSlice = baseRows;
+          reportLabel = drillDown?.loadAllRows
+            ? "Full dataset (overview line — not narrowed)"
+            : "Report data (this page)";
+        }
+
+        if (reportSlice.length > 0) {
+          views.push({ id: "report-grid", label: reportLabel, rows: reportSlice });
+        }
+      }
+
+      if (!views.length) {
+        if (baseRows.length) {
+          setDrillMapNotice(
+            "Could not map this card to specific rows. Try an insight that names a column, import status, or metric; or use Export on the main grid.",
+          );
+        } else {
+          toast.error(
+            "No underlying table data is loaded for drill-down. Open AI insights from a report job or register page after the grid has loaded.",
+          );
+        }
+        setDrillModal(null);
+        return;
+      }
+      const truncatedNote =
+        drillDown?.truncated || (drillDown?.totalRowCount && drillDown.totalRowCount > baseRows.length)
+          ? `Showing up to ${baseRows.length.toLocaleString()} of ${Number(drillDown.totalRowCount).toLocaleString()} rows (${drillDown?.loadAllRows ? "full fetch capped for performance" : "current table load"}). Use the main grid export for the complete file if needed.`
+          : undefined;
+      setDrillModal({
+        open: true,
+        loading: false,
+        title: title || "Underlying data",
+        subtitle,
+        views,
+        truncatedNote,
+      });
+    },
+    [drillDown?.caption, drillDown?.truncated, drillDown?.totalRowCount, drillDown?.loadAllRows, gridRows]
+  );
 
   const showKpis = focusedSections.length === 0 || focusedSections.includes("kpis");
   const showTrends = focusedSections.length === 0 || focusedSections.includes("trends");
@@ -1337,137 +2272,162 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
   const overviewCharts = filterChartsByScope(aiResult.charts, "overview");
   const columnCharts = filterChartsByScope(aiResult.charts, "column");
   const rowCharts = filterChartsByScope(aiResult.charts, "row");
-  const atAGlanceItems = [
-    ...(aiResult.totalInsights || []).map((item) => item.text || item.insight),
-    ...(normalizeTextItems(aiResult.trends).slice(0, 2) || []),
-    ...(aiResult.importTracing?.statusCounts
-      ? (() => {
-          const statusCounts = aiResult.importTracing.statusCounts || {};
-          const toNum = (v) => (typeof v === "number" ? v : Number(v || 0));
-          const totalRows = toNum(aiResult.importTracing.totalRows);
 
-          const matched = toNum(
-            statusCounts["Matched"] +
-              statusCounts["matched"] +
-              statusCounts["FULLY MATCHED"] +
-              statusCounts["fully matched"]
-          );
-          const partiallyMatched = toNum(
-            statusCounts["Partially Matched"] +
-              statusCounts["partially matched"]
-          );
-          const deleted = toNum(
-            statusCounts["Deleted"] +
-              statusCounts["deleted"] +
-              statusCounts["DELETED"]
-          );
-          const pending = toNum(
-            statusCounts["null"] +
-              statusCounts["Null"] +
-              statusCounts[null] +
-              statusCounts[""] +
-              statusCounts["pending"] +
-              statusCounts["Pending"]
-          );
+  const atAGlanceItems = useMemo(() => {
+    const out = [];
 
-          const other = Math.max(0, totalRows - (matched + partiallyMatched + deleted + pending));
+    (aiResult.totalInsights || []).forEach((item) => {
+      const t = item.text || item.insight || "";
+      if (!String(t).trim()) return;
+      out.push({
+        text: t,
+        tracingDrillCategory: inferTracingDrillCategoryFromText(`${item.title || ""} ${t}`),
+      });
+    });
 
-          const range = aiResult.importTracing?.updatedTimeRange
-            ? `${aiResult.importTracing.updatedTimeRange.oldest || ""} → ${aiResult.importTracing.updatedTimeRange.newest || ""}`
-            : "";
+    normalizeTextItems(aiResult.trends)
+      .slice(0, 2)
+      .forEach((t) => {
+        if (!String(t).trim()) return;
+        out.push({
+          text: t,
+          tracingDrillCategory: inferTracingDrillCategoryFromText(t),
+        });
+      });
 
-          const conclusion = (() => {
-            const topCat = [
-              { label: "Matched", v: matched },
-              { label: "Partially Matched", v: partiallyMatched },
-              { label: "Deleted", v: deleted },
-              { label: "Pending / Untraced", v: pending },
-              { label: "Other", v: other },
-            ].sort((a, b) => b.v - a.v)[0];
+    if (aiResult.importTracing?.statusCounts) {
+      const statusCounts = aiResult.importTracing.statusCounts || {};
+      const b = aggregateImportTracingStatusCounts(statusCounts);
+      const matched = b.matched;
+      const partiallyMatched = b.partiallyMatched;
+      const deleted = b.deleted;
+      const pending = b.pending;
+      const totalRows = Math.max(safeInt(aiResult.importTracing.totalRows), b.totalFromBuckets);
+      const sumFour = matched + partiallyMatched + deleted + pending;
+      const other =
+        b.other + Math.max(0, totalRows - sumFour - b.other);
 
-            if (topCat?.v <= 0) return "Import update status: no tracing rows available for this selection.";
-            if (topCat.label === "Matched") return "Conclusion: most traced records are fully matched; mapping appears stable for the selected job/table.";
-            if (topCat.label === "Partially Matched") return "Conclusion: most traced records are partially matched; focus on field-level mapping discrepancies and missing keys.";
-            if (topCat.label === "Deleted") return "Conclusion: a significant portion of traced records are marked deleted; verify deletion rules and filter logic.";
-            if (topCat.label === "Pending / Untraced") return "Conclusion: many records are pending/untraced; import tracing may be incomplete—re-run or wait for updates.";
-            return "Conclusion: tracing shows mixed statuses; review the top mismatch reasons and validate input key construction.";
-          })();
+      const range = aiResult.importTracing?.updatedTimeRange
+        ? `${aiResult.importTracing.updatedTimeRange.oldest || ""} → ${aiResult.importTracing.updatedTimeRange.newest || ""}`
+        : "";
 
-          const lines = [
-            `Import tracing — Updated rows: ${totalRows}${range ? ` | ${range}` : ""}`,
-            `Matched: ${matched}`,
-            `Partially matched: ${partiallyMatched}`,
-            `Deleted: ${deleted}`,
-            `Pending / untraced: ${pending}${other ? ` | Other: ${other}` : ""}`,
-            conclusion,
-          ];
+      const conclusion = (() => {
+        const topCat = [
+          { label: "Matched", v: matched },
+          { label: "Partially Matched", v: partiallyMatched },
+          { label: "Deleted", v: deleted },
+          { label: "Pending / Untraced", v: pending },
+          { label: "Other", v: other },
+        ].sort((a, b) => b.v - a.v)[0];
 
-          return lines.filter(Boolean);
-        })()
-      : []),
-    ...(aiResult.registerTracing
-      ? (() => {
-          const toNum = (v) => (typeof v === "number" ? v : Number(v || 0));
-          const multi = aiResult.registerTracing?.multiTableConnection || {};
-          const multiCount = toNum(multi.multiTableRegisterIds);
-          const totalCount = toNum(multi.totalRegisterIds);
-          const singleCount = toNum(multi.singleTableRegisterIds);
-          const unconnectedCount = toNum(multi.unconnectedRegisterIds);
-          const multiRate = totalCount > 0 ? Math.round((multiCount / totalCount) * 10000) / 100 : 0;
+        if (topCat?.v <= 0) return "Import update status: no tracing rows available for this selection.";
+        if (topCat.label === "Matched")
+          return "Conclusion: most traced records are fully matched; mapping appears stable for the selected job/table.";
+        if (topCat.label === "Partially Matched")
+          return "Conclusion: most traced records are partially matched; focus on field-level mapping discrepancies and missing keys.";
+        if (topCat.label === "Deleted")
+          return "Conclusion: a significant portion of traced records are marked deleted; verify deletion rules and filter logic.";
+        if (topCat.label === "Pending / Untraced")
+          return "Conclusion: many records are pending/untraced; import tracing may be incomplete—re-run or wait for updates.";
+        return "Conclusion: tracing shows mixed statuses; review the top mismatch reasons and validate input key construction.";
+      })();
 
-          const conclusion = (() => {
-            if (totalCount <= 0) {
-              return "Conclusion: no register tracing rows available for this selection.";
-            }
-            if (multiCount <= 0) {
-              return "Conclusion: no rows are connected to multiple tableNames; table-link quality looks stable.";
-            }
-            return "Conclusion: rows connected to >1 tableName are present and should be treated as not-good quality risk.";
-          })();
+      out.push({
+        text: `Import tracing — Updated rows: ${totalRows}${range ? ` | ${range}` : ""}`,
+        tracingDrillCategory: undefined,
+        allowFullGrid: true,
+      });
+      out.push({ text: `Matched: ${matched}`, tracingDrillCategory: "matched" });
+      out.push({ text: `Partially matched: ${partiallyMatched}`, tracingDrillCategory: "partiallyMatched" });
+      out.push({ text: `Deleted: ${deleted}`, tracingDrillCategory: "deleted" });
+      out.push({
+        text: `Pending / untraced: ${pending}${other ? ` | Other: ${other}` : ""}`,
+        tracingDrillCategory: "pending",
+      });
+      out.push({ text: conclusion, tracingDrillCategory: undefined });
+    }
 
-          const exampleRows = Array.isArray(multi.multiTableExamples) ? multi.multiTableExamples : [];
-          const exampleLine = exampleRows.length
-            ? "Examples: " +
-              exampleRows
-                .slice(0, 3)
-                .map((ex) => {
-                  const rid = ex?.registerId ?? "-";
-                  const tables = Array.isArray(ex?.connectedTables) ? ex.connectedTables.slice(0, 4).join(", ") : "";
-                  return `${rid}${tables ? ` (${tables})` : ""}`;
-                })
-                .join("; ")
-            : "";
+    if (aiResult.registerTracing) {
+      const multi = aiResult.registerTracing?.multiTableConnection || {};
+      const multiCount = safeInt(multi.multiTableRegisterIds);
+      const totalCount = safeInt(multi.totalRegisterIds);
+      const singleCount = safeInt(multi.singleTableRegisterIds);
+      const unconnectedCount = safeInt(multi.unconnectedRegisterIds);
+      const multiRate = totalCount > 0 ? Math.round((multiCount / totalCount) * 10000) / 100 : 0;
 
-          const lines = [
-            `Register tracing quality — Multi-table connected rows: ${multiCount}/${totalCount} (${multiRate}%)`,
-            `Single-table connected rows: ${singleCount}`,
-            `Unconnected rows: ${unconnectedCount}`,
-            ...(exampleLine ? [exampleLine] : []),
-            conclusion,
-          ];
+      const conclusion = (() => {
+        if (totalCount <= 0) {
+          return "Conclusion: no register tracing rows available for this selection.";
+        }
+        if (multiCount <= 0) {
+          return "Conclusion: no rows are connected to multiple tableNames; table-link quality looks stable.";
+        }
+        return "Conclusion: rows connected to >1 tableName are present and should be treated as not-good quality risk.";
+      })();
 
-          return lines.filter(Boolean);
-        })()
-      : []),
-  ].filter(Boolean);
+      const exampleRows = Array.isArray(multi.multiTableExamples) ? multi.multiTableExamples : [];
+      const exampleLine = exampleRows.length
+        ? "Examples: " +
+          exampleRows
+            .slice(0, 3)
+            .map((ex) => {
+              const rid = ex?.registerId ?? "-";
+              const tables = Array.isArray(ex?.connectedTables) ? ex.connectedTables.slice(0, 4).join(", ") : "";
+              return `${rid}${tables ? ` (${tables})` : ""}`;
+            })
+            .join("; ")
+        : "";
+
+      const registerLines = [
+        {
+          text: `Register tracing quality — Multi-table connected rows: ${multiCount}/${totalCount} (${multiRate}%)`,
+          allowFullGrid: true,
+        },
+        `Single-table connected rows: ${singleCount}`,
+        `Unconnected rows: ${unconnectedCount}`,
+        ...(exampleLine ? [exampleLine] : []),
+        conclusion,
+      ];
+      registerLines.forEach((line) => {
+        if (typeof line === "object" && line?.text && String(line.text).trim()) {
+          out.push(line);
+        } else if (String(line).trim()) {
+          out.push(line);
+        }
+      });
+    }
+
+    return out.filter((x) => Boolean(atAGlanceItemText(x)));
+  }, [aiResult]);
   const hidden = new Set(hiddenInsightIds || []);
 
   return (
     <div className="space-y-6 text-gray-900">
-      <div className="rounded-2xl border border-slate-200/80 bg-white/95 backdrop-blur p-3.5 shadow-sm min-w-0 overflow-hidden sticky top-0 z-10">
-        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-2">
-          <div className="min-w-0">
-            <div className="text-sm font-semibold text-gray-900">Insight filters</div>
-            <p className="text-xs text-gray-500 mt-0.5 max-w-xl">
-              By default everything is shown. Click sections to focus; click again to remove. Clear focus to show all
-              again.
-            </p>
+      <div className="rounded-2xl border border-violet-200/40 bg-gradient-to-br from-white via-violet-50/20 to-slate-50/40 backdrop-blur-sm p-3.5 sm:p-4 shadow-md shadow-violet-900/5 ring-1 ring-slate-200/60 min-w-0 overflow-hidden sticky top-0 z-10">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-3">
+          <div className="min-w-0 flex gap-3">
+            <span
+              className="hidden sm:flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 text-white shadow-md shadow-violet-500/25"
+              aria-hidden
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" />
+                <path d="M5 19h14" opacity="0.5" />
+              </svg>
+            </span>
+            <div>
+              <div className="text-sm font-semibold text-slate-900 tracking-tight">Insight filters</div>
+              <p className="text-xs text-slate-500 mt-0.5 max-w-xl leading-relaxed">
+                Everything shows by default. Tap a section to focus the view; tap again to remove. Use{" "}
+                <span className="font-medium text-violet-800">Show all</span> to reset.
+              </p>
+            </div>
           </div>
           {focusedSections.length > 0 && (
             <button
               type="button"
               onClick={clearSectionFocus}
-              className="shrink-0 self-start sm:self-auto px-3 py-1 rounded-full text-xs font-semibold border border-purple-200 bg-purple-50 text-purple-900 hover:bg-purple-100 transition-colors"
+              className="shrink-0 self-start sm:self-auto px-3.5 py-1.5 rounded-full text-xs font-semibold border border-violet-300/80 bg-white text-violet-900 hover:bg-violet-50 shadow-sm transition-colors"
             >
               Show all sections
             </button>
@@ -1478,10 +2438,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <button
             type="button"
             onClick={() => toggleSection("kpis")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
               isFilterChipActive("kpis")
-                ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
             1. KPIs & Data
@@ -1489,10 +2449,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <button
             type="button"
             onClick={() => toggleSection("columnInsights")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
               isFilterChipActive("columnInsights")
-                ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
             2. Column Insights
@@ -1500,10 +2460,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <button
             type="button"
             onClick={() => toggleSection("rowInsights")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
               isFilterChipActive("rowInsights")
-                ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
             3. Row Insights
@@ -1512,10 +2472,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
             <button
               type="button"
               onClick={() => toggleSection("importDataTracing")}
-              className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+              className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
                 isFilterChipActive("importDataTracing")
-                  ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                  : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                  ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                  : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
               }`}
             >
               4. Import Data Tracing
@@ -1525,10 +2485,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
             <button
               type="button"
               onClick={() => toggleSection("registerCompare")}
-              className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+              className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
                 isFilterChipActive("registerCompare")
-                  ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                  : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                  ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                  : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
               }`}
             >
               4. Register tracing (compare)
@@ -1537,10 +2497,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <button
             type="button"
             onClick={() => toggleSection("trends")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
               isFilterChipActive("trends")
-                ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
             5. Trends / Changes
@@ -1548,10 +2508,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <button
             type="button"
             onClick={() => toggleSection("maturity")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
               isFilterChipActive("maturity")
-                ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
             6. Maturity
@@ -1559,10 +2519,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <button
             type="button"
             onClick={() => toggleSection("risks")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
               isFilterChipActive("risks")
-                ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
             7. Risks / Alerts
@@ -1570,10 +2530,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <button
             type="button"
             onClick={() => toggleSection("positives")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
               isFilterChipActive("positives")
-                ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
             8. Positives
@@ -1581,10 +2541,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <button
             type="button"
             onClick={() => toggleSection("recommendations")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
               isFilterChipActive("recommendations")
-                ? "bg-purple-50 text-purple-900 border-purple-200 shadow-sm"
-                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
             9. Recommendations
@@ -1603,10 +2563,48 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
                 {(aiResult.kpis || []).map((kpi, idx) => {
                   const insightId = `kpi-${idx}`;
                   if (hidden.has(insightId)) return null;
+                  const kpiDrillable = reportRowsAvailable;
                   return (
                     <li
                       key={insightId}
-                      className="border rounded-xl p-3 text-sm bg-white shadow-sm min-h-[110px] hover:shadow-md transition-shadow"
+                      role={kpiDrillable ? "button" : undefined}
+                      tabIndex={kpiDrillable ? 0 : undefined}
+                      onClick={() => {
+                        if (!reportRowsAvailable) {
+                          toast.error("Open AI insights from a report job or register table (with the grid loaded) to drill into KPI rows.");
+                          return;
+                        }
+                        const kpiBlob = `${kpi.title || ""} ${kpi.description || ""} ${kpi.value ?? ""}`;
+                        void openInsightDrillDown({
+                          title: kpi.title || `KPI ${idx + 1}`,
+                          extraHint: [kpi.description, kpi.value !== undefined ? `Value: ${kpi.value}` : ""]
+                            .filter(Boolean)
+                            .join(" · "),
+                          tracingDrillCategory: inferTracingDrillCategoryFromText(kpiBlob) || undefined,
+                          kpiValue: kpi.value,
+                        });
+                      }}
+                      onKeyDown={
+                        kpiDrillable
+                          ? (e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                const kpiBlob = `${kpi.title || ""} ${kpi.description || ""} ${kpi.value ?? ""}`;
+                                void openInsightDrillDown({
+                                  title: kpi.title || `KPI ${idx + 1}`,
+                                  extraHint: [kpi.description, kpi.value !== undefined ? `Value: ${kpi.value}` : ""]
+                                    .filter(Boolean)
+                                    .join(" · "),
+                                  tracingDrillCategory: inferTracingDrillCategoryFromText(kpiBlob) || undefined,
+                                  kpiValue: kpi.value,
+                                });
+                              }
+                            }
+                          : undefined
+                      }
+                      className={`border rounded-xl p-3 text-sm bg-white shadow-sm min-h-[110px] hover:shadow-md transition-shadow ${
+                        kpiDrillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60" : ""
+                      }`}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="font-medium text-gray-800">{kpi.title}</div>
@@ -1626,6 +2624,9 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
                           {kpi.description}
                         </div>
                       )}
+                      {kpiDrillable && (
+                        <div className="text-[11px] font-medium text-violet-700 pt-1">Click for underlying report data</div>
+                      )}
                     </li>
                   );
                 })}
@@ -1636,10 +2637,13 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
               items={aiResult.totalInsights}
               onInsightFeedback={onInsightFeedback}
               hiddenInsightIds={hiddenInsightIds}
+              onDrillDown={openInsightDrillDown}
+              reportRowsAvailable={reportRowsAvailable}
             />
             <ChartGrid
               charts={overviewCharts.length ? overviewCharts : aiResult.charts?.slice(0, 2)}
               onInsightFeedback={onInsightFeedback}
+              onDrillDown={openInsightDrillDown}
             />
           </div>
         </section>
@@ -1656,8 +2660,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
             type="column"
             onInsightFeedback={onInsightFeedback}
             hiddenInsightIds={hiddenInsightIds}
+            onDrillDown={openInsightDrillDown}
+            reportRowsAvailable={reportRowsAvailable}
           />
-          <ChartGrid charts={columnCharts} onInsightFeedback={onInsightFeedback} />
+          <ChartGrid charts={columnCharts} onInsightFeedback={onInsightFeedback} onDrillDown={openInsightDrillDown} />
         </section>
       )}
 
@@ -1672,8 +2678,10 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
             type="row"
             onInsightFeedback={onInsightFeedback}
             hiddenInsightIds={hiddenInsightIds}
+            onDrillDown={openInsightDrillDown}
+            reportRowsAvailable={reportRowsAvailable}
           />
-          <ChartGrid charts={rowCharts} onInsightFeedback={onInsightFeedback} />
+          <ChartGrid charts={rowCharts} onInsightFeedback={onInsightFeedback} onDrillDown={openInsightDrillDown} />
         </section>
       )}
 
@@ -1710,6 +2718,7 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
             tracing={tracingForPanel}
             onInsightFeedback={onInsightFeedback}
             hiddenInsightIds={hiddenInsightIds}
+            onDrillDown={openInsightDrillDown}
           />
           <ImportTracingDeepPanel
             deep={tracingForPanel?.deepAnalysis}
@@ -1729,6 +2738,8 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
             items={atAGlanceItems}
             onInsightFeedback={onInsightFeedback}
             hiddenInsightIds={hiddenInsightIds}
+            onDrillDown={openInsightDrillDown}
+            reportRowsAvailable={reportRowsAvailable}
           />
         </section>
       )}
@@ -1742,6 +2753,8 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           <MaturityCard
             maturityScore={aiResult.maturityScore}
             onInsightFeedback={onInsightFeedback}
+            onDrillDown={openInsightDrillDown}
+            reportRowsAvailable={reportRowsAvailable}
           />
         </section>
       )}
@@ -1753,6 +2766,8 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           tone="risk"
           onInsightFeedback={onInsightFeedback}
           hiddenInsightIds={hiddenInsightIds}
+          onDrillDown={openInsightDrillDown}
+          reportRowsAvailable={reportRowsAvailable}
         />
       )}
 
@@ -1763,6 +2778,8 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           tone="positive"
           onInsightFeedback={onInsightFeedback}
           hiddenInsightIds={hiddenInsightIds}
+          onDrillDown={openInsightDrillDown}
+          reportRowsAvailable={reportRowsAvailable}
         />
       )}
 
@@ -1773,8 +2790,45 @@ const AiInsightContent = ({ aiResult, onInsightFeedback, hiddenInsightIds, pathn
           tone="neutral"
           onInsightFeedback={onInsightFeedback}
           hiddenInsightIds={hiddenInsightIds}
+          onDrillDown={openInsightDrillDown}
+          reportRowsAvailable={reportRowsAvailable}
         />
       )}
+
+      <InsightDrillDownModal
+        open={Boolean(drillModal?.open)}
+        onClose={() => setDrillModal(null)}
+        title={drillModal?.title}
+        subtitle={drillModal?.subtitle}
+        views={drillModal?.views || []}
+        truncatedNote={drillModal?.truncatedNote}
+        loading={Boolean(drillModal?.loading)}
+      />
+
+      <Dialog
+        open={Boolean(drillMapNotice)}
+        onClose={() => setDrillMapNotice(null)}
+        maxWidth="sm"
+        fullWidth
+        slotProps={{
+          paper: {
+            className: "rounded-xl shadow-lg border border-amber-100",
+            sx: { bgcolor: "rgb(255 251 235)" },
+          },
+        }}
+      >
+        <DialogTitle className="text-base font-semibold text-amber-950 pb-0">
+          Could not map to rows
+        </DialogTitle>
+        <DialogContent className="pt-2 pb-4">
+          <p className="text-sm text-amber-950/90 leading-relaxed m-0">{drillMapNotice}</p>
+        </DialogContent>
+        <DialogActions className="px-3 pb-3 pt-0">
+          <Button size="small" onClick={() => setDrillMapNotice(null)} color="inherit">
+            Dismiss
+          </Button>
+        </DialogActions>
+      </Dialog>
     </div>
   );
 };
@@ -1788,8 +2842,9 @@ export function AiChatContextStrip({ charts = [], kpisSnapshot = [], maxCharts =
   if (!chartSlice.length && !kpiSlice.length) return null;
 
   return (
-    <div className="mt-3 space-y-2 rounded-xl border border-violet-100 bg-gradient-to-br from-violet-50/60 to-white p-2.5 shadow-sm">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-violet-800 px-0.5">
+    <div className="mt-3 space-y-2.5 rounded-xl border border-violet-200/60 bg-gradient-to-br from-violet-50/70 via-white to-indigo-50/20 p-3 shadow-sm ring-1 ring-violet-100/50">
+      <div className="text-[10px] font-bold uppercase tracking-wider text-violet-800 px-0.5 flex items-center gap-1.5">
+        <span className="h-1.5 w-1.5 rounded-full bg-violet-500 shadow-sm shadow-violet-400/80" aria-hidden />
         Context from insights
       </div>
       {!!kpiSlice.length && (

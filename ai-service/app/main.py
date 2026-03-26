@@ -18,6 +18,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.prompt_defaults import (
+    KEY_ADMIN_CONSOLE_INSIGHTS,
+    KEY_DATA_CONSOLE_INSIGHTS,
+    KEY_GLOBAL_CHAT_PREFIX,
+    KEY_PAGE_CHAT_PREFIX,
+    KEY_TABULAR_ANALYSIS_SYSTEM,
+    PROMPT_DEFAULTS,
+    PROMPT_SECTIONS,
+)
 from app.storage import AIStateStore, utc_day_key
 
 
@@ -130,7 +139,35 @@ class GlobalChatSessionRequest(BaseModel):
     contextFilters: Dict[str, Any] = {}
 
 
+class PromptConfigSection(BaseModel):
+    id: str
+    title: str
+    description: str
+    value: str
+    isCustom: bool
+    defaultText: str
+
+
+class PromptConfigResponse(BaseModel):
+    sections: List[PromptConfigSection]
+
+
+class PromptConfigUpdateRequest(BaseModel):
+    """Set values to replace defaults; null or empty string removes override for that key."""
+
+    prompts: Dict[str, Optional[str]] = Field(default_factory=dict)
+
+
 app = FastAPI(title="AssetRegister AI Sidecar", version="1.0.0")
+
+_MAX_APP_PROMPT_CHARS = 60000
+
+
+def _resolve_app_prompt(prompt_key: str) -> str:
+    raw = get_store().get_app_prompt(prompt_key)
+    if raw is not None and str(raw).strip():
+        return str(raw).strip()
+    return (PROMPT_DEFAULTS.get(prompt_key) or "").strip()
 
 
 def _cors_origins_list(origins_str: str) -> List[str]:
@@ -532,7 +569,7 @@ def _normalize_filters_for_cache(filters: Dict[str, Any]) -> Dict[str, Any]:
 
 def _dataset_key(payload: AnalyzeRequest | ChatRequest | ChatSessionRequest) -> str:
     # Bump this to force re-generation when we change prompt structure/context injection.
-    analysis_cache_version = "register-tracing-v8-admin-data-home"
+    analysis_cache_version = "register-tracing-v9-tabular-chat-summary"
     raw = {
         "orgId": payload.orgId,
         "userId": payload.userId,
@@ -1144,17 +1181,7 @@ def _llm_admin_console_highlights(
     metrics: Dict[str, Any],
     extra_context: str,
 ) -> Dict[str, Any]:
-    system = (
-        "You write executive Admin Console summaries covering Import Status, Saved Jobs, AR Mapping, and AR Rules.\n"
-        "Return JSON only with keys:\n"
-        "- executiveSummary: string, 2-4 sentences.\n"
-        "- moduleStories: array of {module, title, bullets} where module is one of "
-        "\"Import Status\"|\"Saved Jobs\"|\"AR Mapping\"|\"AR Rules\"; bullets: max 4 short strings each.\n"
-        "- watchlist: array of short strings, max 5 (risks or attention items).\n"
-        "- operationalNotes: array of short strings, max 4.\n"
-        "Rules: Copy METRICS counts exactly — never invent numbers. "
-        "Do not emit KPI objects, chart specs, or generic data-quality recommendation lists; stay operational.\n"
-    )
+    system = _resolve_app_prompt(KEY_ADMIN_CONSOLE_INSIGHTS)
     user = "METRICS (authoritative numbers):\n" + json.dumps(metrics, indent=2, default=str)
     if (extra_context or "").strip():
         user += "\n\nSESSION / USER CONTEXT:\n" + (extra_context or "").strip()[:8000]
@@ -1483,17 +1510,7 @@ def _build_data_console_home_response(
 
     custom = (payload.customPrompt or "").strip()
     fb_context = _build_preprocessing_context(custom, feedback_list, chat_messages)
-    system = (
-        "You summarize the Data Console home view for executives: jobs, AC vs DC record volumes, "
-        "maturity dimensions (completeness, consistency, changes, timeliness), and register/data-source mix.\n"
-        "Return JSON only with keys:\n"
-        "- executiveSummary: string 2-4 sentences using METRICS numbers exactly.\n"
-        "- maturityNarrative: string explaining overall maturity in plain language.\n"
-        "- jobHighlights: array of max 6 short strings about jobs or AC/DC balance.\n"
-        "- registerNarrative: string (empty if no register metrics).\n"
-        "- notes: array of max 4 short strings.\n"
-        "Do not output KPI widget objects or chart definitions.\n"
-    )
+    system = _resolve_app_prompt(KEY_DATA_CONSOLE_INSIGHTS)
     user = "METRICS:\n" + json.dumps(metrics, indent=2, default=str)
     if fb_context.strip():
         user += "\n\nCONTEXT:\n" + fb_context[:8000]
@@ -2205,6 +2222,20 @@ def _format_session_feedback_for_prompt(feedback: List[Dict[str, Any]]) -> str:
 def _build_compact_data_summary_for_chat(analysis: Dict[str, Any]) -> str:
     """Single readable block so chat models anchor on real numbers (not generic advice)."""
     lines: List[str] = []
+    tab = analysis.get("tabularDataSummary")
+    if isinstance(tab, dict) and tab:
+        lines.append("TABULAR DATASET SNAPSHOT (ground truth from analyzed grid):")
+        lines.append(
+            f"rows={tab.get('total_rows')} cols={tab.get('total_columns')} "
+            f"missing_cell_rate={tab.get('missing_cell_rate')} duplicate_rows={tab.get('duplicate_rows')}"
+        )
+        cols = tab.get("column_names") or []
+        if cols:
+            lines.append("column_names: " + ", ".join(str(c) for c in cols[:80]))
+        num_prev = tab.get("numeric_summary_preview") or {}
+        if isinstance(num_prev, dict) and num_prev:
+            lines.append("numeric_summary_preview (JSON): " + json.dumps(num_prev, default=str)[:6000])
+        lines.append("")
     meta = analysis.get("analysisMeta") or {}
     if meta:
         lines.append(f"Rows analyzed (this run): {meta.get('rowsAnalyzed', 'unknown')}")
@@ -2253,7 +2284,8 @@ def _chat_system_prompt(
     compact = (analysis_context or {}).get("compactSummaryText") or ""
     ctx_for_dump = {k: v for k, v in (analysis_context or {}).items() if k != "compactSummaryText"}
     fb_text = _format_session_feedback_for_prompt(feedback)
-    return (
+    org_prefix = _resolve_app_prompt(KEY_PAGE_CHAT_PREFIX)
+    core = (
         "You are a senior Data Analyst and Data Quality Expert.\n"
         "Use the cached daily analysis as the authoritative understanding of today's dataset.\n"
         "Continue the conversation consistently across this user's same-day session.\n\n"
@@ -2276,6 +2308,9 @@ def _chat_system_prompt(
         f"Expanded analysis context:\n{json.dumps(ctx_for_dump, indent=2, default=str)}\n\n"
         f"Session feedback log (chronological):\n{fb_text}"
     )
+    if org_prefix:
+        return org_prefix.rstrip() + "\n\n" + core.lstrip()
+    return core
 
 
 def _analysis_system_prompt(analysis_profile: Optional[str] = None) -> str:
@@ -2331,54 +2366,8 @@ def _analysis_system_prompt(analysis_profile: Optional[str] = None) -> str:
             "RegisterTracingStatus and table-level status breakdowns are supporting context; multi-table connectivity dominates risk scoring."
         )
 
-    return (
-        "You are a senior Data Analyst and Data Quality Expert.\n"
-        "Your task is to generate a highly accurate, structured, and insight-driven analysis that combines\n"
-        "basic descriptive analytics with advanced analytical reasoning. Be data-driven and precise, avoid\n"
-        "generic statements, and adapt fully to the specific dataset that is provided (no hardcoded assumptions\n"
-        "about column names or business domain).\n"
-        "\n"
-        "Clearly distinguish between:\n"
-        "- observations (what the data shows),\n"
-        "- insights (what it means), and\n"
-        "- risks (why it matters).\n"
-        "Highlight confidence levels or limitations when uncertainty exists.\n"
-        "\n"
-        "The provided numbers were computed directly from backend response data. Use those statistics as\n"
-        "authoritative; do NOT invent counts or rows that are not supported by the summary JSON.\n"
-        "\n"
-        "You are producing a single JSON object that the frontend will render into sections similar to:\n"
-        "- Executive summary (top findings, risks, overall health/maturity),\n"
-        "- Dataset understanding (record/column counts, likely identifiers and field types),\n"
-        "- Basic analytics (coverage, missingness, duplicates, distributions),\n"
-        "- Advanced analytics (patterns, relationships, consistency checks, outliers),\n"
-        "- Data quality assessment and maturity scores,\n"
-        "- Anomaly and risk analysis,\n"
-        "- Recommendations and opportunities (immediate, medium-term, strategic).\n"
-        "\n"
-        "Return valid JSON only with exactly these keys:\n"
-        "totalInsights, kpis, charts, trends, maturityScore, risks, positives, recommendations, analysisSummary, columnInsights, rowInsights.\n"
-        "- totalInsights: array of {title, text, severity} capturing the executive summary and key dataset-wide insights.\n"
-        "- kpis: array of {title, value, description} for the most important metrics and health indicators.\n"
-        "- charts: array of {id, type, title, xAxis, series} for dashboard-ready visual summaries (no markdown tables).\n"
-        "- trends: array of {text} describing directional changes, patterns, or maturity signals.\n"
-        "- risks: array of {text} describing concrete data and business risks with implied severity.\n"
-        "- positives: array of {text} highlighting strengths, good coverage, or stable areas.\n"
-        "- recommendations: array of {text} focusing on immediate fixes, medium-term improvements, and strategic enhancements.\n"
-        "- maturityScore: {score, comment} where score is 0–100 and comment explains overall maturity (completeness, consistency, integrity, usability).\n"
-        "- analysisSummary: short object for reuse in chat {system_health, key_risks, root_causes, recommendations}.\n"
-        "- columnInsights: array of {column, insight, severity, recommendation} describing column-level quality, patterns, and actions.\n"
-        "- rowInsights: array of {issue, insight, operational_risk, recommendation} describing row-level or group-of-rows issues and their impact.\n"
-        "\n"
-        "You must cover all three levels explicitly and completely:\n"
-        "1. totalInsights for the whole dataset (executive and dataset-wide view),\n"
-        "2. columnInsights for all provided column profiles that matter for quality or interpretation,\n"
-        "3. rowInsights for all provided row/issue summaries and anomaly groups.\n"
-        "\n"
-        "Use concise, decision-oriented language that is specific and actionable. Separate facts from\n"
-        "interpretation, label assumptions when you must make them, and focus on quality of insight over\n"
-        "quantity. Charts must be dashboard-ready JSON only; do not output markdown or free-form narrative.\n"
-        "If USER CUSTOM PROMPT explicitly requests additional KPIs/metrics or changes to the KPI list, reflect it in the returned `kpis` array (and adjust `charts` when appropriate).\n\n"
+    base = _resolve_app_prompt(KEY_TABULAR_ANALYSIS_SYSTEM)
+    return base + (
         f"ANALYSIS PROFILE GUIDANCE:\n{profile_guidance if profile_guidance else 'Use default cross-domain analysis behavior.'}"
     )
 
@@ -4220,6 +4209,21 @@ def _analysis_from_rows(
         llm_chunks.append(chunk_result)
     merged = _merge_llm_chunks(base, llm_chunks)
     _filter_irrelevant_insights(merged, feedback_list or [])
+    stats_blk = (summary.get("statistics") or {}) if isinstance(summary, dict) else {}
+    num_prev = summary.get("numeric_summary") if isinstance(summary, dict) else {}
+    if isinstance(num_prev, dict) and num_prev:
+        num_preview = dict(list(num_prev.items())[:24])
+    else:
+        num_preview = {}
+    merged["tabularDataSummary"] = {
+        "total_rows": stats_blk.get("total_rows"),
+        "total_columns": stats_blk.get("total_columns"),
+        "column_names": (stats_blk.get("columns") or [])[:100],
+        "missing_cell_rate": stats_blk.get("missing_cell_rate"),
+        "missing_cells": stats_blk.get("missing_cells"),
+        "duplicate_rows": stats_blk.get("duplicate_rows"),
+        "numeric_summary_preview": num_preview,
+    }
     merged["analysisMeta"] = {
         "dayKey": utc_day_key(),
         "rowsAnalyzed": int(len(df)),
@@ -4610,11 +4614,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
             latest_user_question = str(m.get("content") or "")
             break
 
-    system_prefix = (
-        "You are a global assistant for AssetRegister consoles.\n"
-        "Be highly conversational and helpful like modern GPT assistants.\n"
-        "Ground responses in available analysis context for the selected module."
-    )
+    system_prefix = _resolve_app_prompt(KEY_GLOBAL_CHAT_PREFIX)
     messages = [
         {"role": "system", "content": system_prefix},
         {
@@ -4687,6 +4687,61 @@ def clear_global_chat_session(payload: GlobalChatSessionRequest, settings: Setti
     )
     store.clear_chat_messages(day_key, payload.orgId, payload.userId, session_page_id, session_key)
     return {"ok": True, "message": "Global chat session cleared for this scope."}
+
+
+@app.get("/api/ai/prompt-config", response_model=PromptConfigResponse)
+def get_prompt_config():
+    store = get_store()
+    sections: List[PromptConfigSection] = []
+    for meta in PROMPT_SECTIONS:
+        pid = str(meta["id"])
+        default_text = PROMPT_DEFAULTS.get(pid, "")
+        stored = store.get_app_prompt(pid)
+        is_custom = stored is not None and bool(str(stored).strip())
+        sections.append(
+            PromptConfigSection(
+                id=pid,
+                title=str(meta["title"]),
+                description=str(meta["description"]),
+                value=_resolve_app_prompt(pid),
+                isCustom=is_custom,
+                defaultText=default_text,
+            )
+        )
+    return PromptConfigResponse(sections=sections)
+
+
+@app.put("/api/ai/prompt-config")
+def put_prompt_config(payload: PromptConfigUpdateRequest):
+    store = get_store()
+    for key, val in (payload.prompts or {}).items():
+        if key not in PROMPT_DEFAULTS:
+            raise HTTPException(status_code=400, detail=f"Unknown prompt key '{key}'.")
+        if val is None or (isinstance(val, str) and not val.strip()):
+            store.delete_app_prompt(key)
+            continue
+        body = val.strip()
+        if len(body) > _MAX_APP_PROMPT_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Prompt '{key}' exceeds {_MAX_APP_PROMPT_CHARS} characters.",
+            )
+        store.set_app_prompt(key, body)
+    return {"ok": True}
+
+
+@app.post("/api/ai/chat/clear-thread")
+def clear_chat_thread_only(payload: ChatSessionRequest):
+    """Clear stored chat messages only; keep feedback and cached analysis."""
+    _ensure_supported_page_id(payload.pageId)
+    store = get_store()
+    day_key = utc_day_key()
+    session_key = _session_dataset_key(payload)
+    store.clear_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
+    return {
+        "ok": True,
+        "message": "Chat thread cleared. Insight feedback for this session is unchanged.",
+    }
 
 
 @app.post("/api/ai/chat/clear")

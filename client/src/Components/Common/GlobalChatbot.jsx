@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useSelector } from "react-redux";
 import { Button, CircularProgress, MenuItem, Select, TextField, Typography } from "@mui/material";
-import { MessageCircle, X } from "lucide-react";
+import { MessageCircle, Sparkles, X } from "lucide-react";
 import { clearGlobalChatSession, globalChat } from "../../Service/ai.service";
 import { getRequest } from "../../Service/api.service";
 import { AiChatContextStrip } from "./AiInsightContent";
@@ -51,8 +51,6 @@ const GlobalChatbot = () => {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [messages, setMessages] = useState([]);
-  const [latestInsight, setLatestInsight] = useState(null);
-  const [latestCharts, setLatestCharts] = useState([]);
   const [objects, setObjects] = useState([]);
   const [objectsLoading, setObjectsLoading] = useState(false);
   const [jobRows, setJobRows] = useState([]);
@@ -74,8 +72,6 @@ const GlobalChatbot = () => {
       setReportJobName(saved.reportJobName || "");
       setSecuritySubModule(saved.securitySubModule || "users");
       setMessages(Array.isArray(saved.messages) ? saved.messages.slice(-40) : []);
-      setLatestInsight(saved.latestInsight || null);
-      setLatestCharts(Array.isArray(saved.latestCharts) ? saved.latestCharts : []);
     } catch (e) {
       // ignore invalid cache
     }
@@ -94,9 +90,10 @@ const GlobalChatbot = () => {
           adminModule,
           reportJobName,
           securitySubModule,
-          messages: messages.slice(-40),
-          latestInsight,
-          latestCharts,
+          messages: messages.slice(-40).map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
         })
       );
     } catch (e) {
@@ -112,8 +109,6 @@ const GlobalChatbot = () => {
     reportJobName,
     securitySubModule,
     messages,
-    latestInsight,
-    latestCharts,
   ]);
 
   const resolvedObjectId = useMemo(() => {
@@ -293,10 +288,13 @@ const GlobalChatbot = () => {
       });
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: res?.answer || "No response returned." },
+        {
+          role: "assistant",
+          content: res?.answer || "No response returned.",
+          insight: res?.insight || null,
+          charts: Array.isArray(res?.charts) ? res.charts : [],
+        },
       ]);
-      setLatestInsight(res?.insight || null);
-      setLatestCharts(Array.isArray(res?.charts) ? res.charts : []);
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -332,8 +330,6 @@ const GlobalChatbot = () => {
 
   const handleResetConversation = async () => {
     setMessages([]);
-    setLatestInsight(null);
-    setLatestCharts([]);
     setOnboardDone(false);
     setChatInput("");
     try {
@@ -345,8 +341,6 @@ const GlobalChatbot = () => {
 
   const handleChangeModule = () => {
     setMessages([]);
-    setLatestInsight(null);
-    setLatestCharts([]);
     setOnboardDone(false);
     setChatInput("");
   };
@@ -356,22 +350,39 @@ const GlobalChatbot = () => {
       {!open && (
         <button
           type="button"
-          aria-label="Open global chatbot"
+          aria-label="Open assistant — cross-console chat"
+          title="Open assistant"
           onClick={() => setOpen(true)}
-          className="fixed bottom-6 right-6 z-[1200] rounded-full shadow-xl bg-gradient-to-br from-purple-600 to-blue-600 text-white p-3.5 hover:from-purple-700 hover:to-blue-700 transition"
+          className="fixed bottom-6 right-6 z-[1200] group flex items-center gap-2 rounded-full pl-3 pr-1.5 py-1.5 shadow-lg shadow-violet-500/25 bg-gradient-to-r from-violet-600 to-indigo-600 text-white ring-2 ring-white/90 hover:from-violet-500 hover:to-indigo-500 hover:shadow-xl hover:shadow-violet-500/30 focus:outline-none focus-visible:ring-4 focus-visible:ring-violet-300 transition-all"
         >
-          <MessageCircle size={22} />
+          <MessageCircle size={20} strokeWidth={2} className="shrink-0 opacity-95" aria-hidden />
+          <span className="text-sm font-semibold pr-1 max-sm:hidden">Assistant</span>
+          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white/15 ring-1 ring-white/30">
+            <Sparkles size={18} strokeWidth={1.75} aria-hidden />
+          </span>
         </button>
       )}
 
       {open && (
-        <div className="fixed bottom-6 right-6 z-[1200] w-[420px] max-w-[96vw] max-h-[min(640px,92vh)] flex flex-col bg-white/95 backdrop-blur rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
-          <div className="px-3 py-2.5 border-b flex items-start justify-between gap-2 bg-gradient-to-r from-purple-50 to-blue-50 shrink-0">
+        <div
+          className="fixed bottom-6 right-6 z-[1200] w-[420px] max-w-[96vw] max-h-[min(640px,92vh)] flex flex-col bg-white rounded-2xl border border-slate-200/90 shadow-2xl shadow-slate-900/15 overflow-hidden ring-1 ring-slate-900/5"
+          role="dialog"
+          aria-label="Global assistant"
+        >
+          <div className="px-3.5 py-3 border-b border-white/10 flex items-start justify-between gap-2 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 text-white shrink-0 shadow-sm">
             <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold text-gray-800 leading-tight">Assistant</div>
+              <div className="flex items-center gap-2">
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/15 ring-1 ring-white/25 shrink-0">
+                  <Sparkles size={16} className="text-white" strokeWidth={2} aria-hidden />
+                </span>
+                <div className="text-sm font-semibold leading-tight tracking-tight">Assistant</div>
+              </div>
+              <div className="text-[11px] text-violet-100/90 mt-1 leading-snug pl-10">
+                Grounded in your console scope and metrics
+              </div>
               {onboardDone && (
                 <span
-                  className="mt-1 inline-flex max-w-full items-center rounded-full border border-violet-200/90 bg-white/95 px-2 py-0.5 text-[10px] font-medium leading-tight text-violet-900 shadow-sm"
+                  className="mt-2 ml-10 inline-flex max-w-[calc(100%-2.5rem)] items-center rounded-full border border-white/25 bg-black/10 px-2.5 py-0.5 text-[10px] font-medium leading-tight text-white"
                   title={scopeSummary}
                 >
                   <span className="truncate">{scopeChipLabel}</span>
@@ -383,15 +394,15 @@ const GlobalChatbot = () => {
                 <>
                   <button
                     type="button"
-                    className="text-[10px] px-2 py-1 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                    className="text-[10px] px-2.5 py-1 rounded-full border border-white/35 bg-white/10 text-white hover:bg-white/20 transition-colors"
                     onClick={handleChangeModule}
                     aria-label="Change context"
                   >
-                    Change context
+                    Context
                   </button>
                   <button
                     type="button"
-                    className="text-[10px] px-2 py-1 rounded border border-red-200 bg-red-50 text-red-700 hover:bg-red-100"
+                    className="text-[10px] px-2.5 py-1 rounded-full border border-red-200/80 bg-red-500/20 text-white hover:bg-red-500/30 transition-colors"
                     onClick={handleResetConversation}
                     aria-label="Reset conversation"
                   >
@@ -401,7 +412,7 @@ const GlobalChatbot = () => {
               )}
               <button
                 type="button"
-                className="text-gray-600 hover:text-gray-900"
+                className="p-1 rounded-lg text-white/90 hover:bg-white/15 hover:text-white"
                 onClick={() => setOpen(false)}
                 aria-label="Close global chatbot"
               >
@@ -411,14 +422,14 @@ const GlobalChatbot = () => {
           </div>
 
           {!onboardDone ? (
-            <div className="p-3 space-y-3 overflow-y-auto flex-1 min-h-0">
-              <Typography variant="body2" className="text-gray-700 !text-[13px] !leading-snug">
-                Hi — I’ll route your questions to the right data. Pick where you’re working (object, console, then
-                area). After that, type naturally; I’ll infer what you need.
+            <div className="p-4 space-y-4 overflow-y-auto flex-1 min-h-0 bg-gradient-to-b from-slate-50/80 to-white">
+              <Typography variant="body2" className="text-slate-700 !text-[13px] !leading-relaxed">
+                Choose <strong>object</strong>, <strong>console</strong>, and <strong>area</strong> so answers match where
+                you’re working. Then chat in plain language.
               </Typography>
 
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-gray-700">1 · Object</label>
+              <div className="space-y-1.5">
+                <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">1 · Object</label>
                 <Select
                   size="small"
                   fullWidth
@@ -438,8 +449,8 @@ const GlobalChatbot = () => {
                 )}
               </div>
 
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-gray-700">2 · Console</label>
+              <div className="space-y-1.5">
+                <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">2 · Console</label>
                 <Select
                   size="small"
                   fullWidth
@@ -454,8 +465,8 @@ const GlobalChatbot = () => {
                 </Select>
               </div>
 
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-gray-700">3 · Area</label>
+              <div className="space-y-1.5">
+                <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">3 · Area</label>
                 <Select
                   size="small"
                   fullWidth
@@ -479,8 +490,8 @@ const GlobalChatbot = () => {
               </div>
 
               {consoleType === "data" && dataModule === "reports" && (
-                <div className="space-y-1">
-                  <label className="block text-xs font-medium text-gray-700">Report job (optional)</label>
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Report job (optional)</label>
                   <Select
                     size="small"
                     fullWidth
@@ -506,8 +517,8 @@ const GlobalChatbot = () => {
               )}
 
               {consoleType === "data" && dataModule === "security" && (
-                <div className="space-y-1">
-                  <label className="block text-xs font-medium text-gray-700">Security data</label>
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Security data</label>
                   <Select
                     size="small"
                     fullWidth
@@ -535,81 +546,98 @@ const GlobalChatbot = () => {
                 </Typography>
               )}
 
-              <Button variant="contained" fullWidth disabled={!canStartChat} onClick={handleStartChat}>
+              <Button
+                variant="contained"
+                fullWidth
+                disabled={!canStartChat}
+                onClick={handleStartChat}
+                sx={{
+                  borderRadius: "12px",
+                  textTransform: "none",
+                  fontWeight: 600,
+                  py: 1.25,
+                  background: "linear-gradient(135deg, #7c3aed 0%, #2563eb 100%)",
+                  boxShadow: "0 4px 14px rgba(124,58,237,0.35)",
+                  "&:hover": { boxShadow: "0 6px 20px rgba(124,58,237,0.4)" },
+                }}
+              >
                 Start conversation
               </Button>
             </div>
           ) : (
-            <div className="p-3 flex flex-col flex-1 min-h-0">
-              <div className="max-h-[min(380px,48vh)] overflow-y-auto space-y-2 pr-1 flex-1 min-h-0">
+            <div className="p-3 flex flex-col flex-1 min-h-0 bg-slate-50/40">
+              <div className="max-h-[min(380px,48vh)] overflow-y-auto space-y-2.5 pr-1 flex-1 min-h-0 [scrollbar-width:thin]">
                 {messages.map((m, i) => (
-                  <div
-                    key={`${m.role}-${i}`}
-                    className={`rounded-lg p-2.5 text-sm ${
-                      m.role === "user"
-                        ? "bg-blue-50 border border-blue-100 text-blue-900 ml-6 shadow-sm"
-                        : "bg-white border border-slate-200 text-gray-800 mr-6 shadow-sm"
-                    }`}
-                  >
-                    <div className="text-[10px] uppercase opacity-70 mb-1 font-semibold">
-                      {m.role === "user" ? "You" : "Assistant"}
+                  <div key={`${m.role}-${i}`} className="space-y-2">
+                    <div
+                      className={`rounded-xl p-3 text-sm leading-relaxed ${
+                        m.role === "user"
+                          ? "bg-gradient-to-br from-sky-50 to-blue-50/90 border border-sky-200/70 text-sky-950 ml-5 shadow-sm"
+                          : "bg-white border border-slate-200/90 text-slate-800 mr-5 shadow-sm"
+                      }`}
+                    >
+                      <div className="text-[10px] uppercase tracking-wider opacity-75 mb-1.5 font-semibold text-current">
+                        {m.role === "user" ? "You" : "Assistant"}
+                      </div>
+                      <div className="whitespace-pre-wrap break-words">{m.content}</div>
                     </div>
-                    <div className="whitespace-pre-wrap break-words">{m.content}</div>
+
+                    {m.role === "assistant" && (m.insight || (m.charts && m.charts.length > 0)) ? (
+                      <div className="rounded-xl border border-violet-200/80 bg-gradient-to-br from-violet-50/90 to-white p-3 text-xs text-slate-800 space-y-2 mr-5 shadow-sm ring-1 ring-violet-100/50">
+                        <div className="font-semibold text-violet-900 flex items-center gap-1.5">
+                          <Sparkles size={12} className="opacity-80" aria-hidden />
+                          Insights & visuals
+                        </div>
+
+                        <AiChatContextStrip
+                          charts={m.charts || []}
+                          kpisSnapshot={m.insight?.kpis || []}
+                          maxCharts={2}
+                        />
+
+                        {!!(m.insight?.trends || []).length && (
+                          <div className="rounded-lg border border-sky-100 bg-white/95 p-2 shadow-sm">
+                            <div className="text-[11px] font-semibold text-slate-700 mb-1">Trends</div>
+                            {(m.insight.trends || []).slice(0, 3).map((t, idx) => (
+                              <div key={`t-${i}-${idx}`} className="mb-1 last:mb-0">
+                                • {t?.text || t?.insight || String(t)}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {!!(m.insight?.risks || []).length && (
+                          <div className="rounded-lg border border-red-100 bg-white/95 p-2 shadow-sm">
+                            <div className="text-[11px] font-semibold text-slate-700 mb-1">Risks</div>
+                            {(m.insight.risks || []).slice(0, 3).map((r, idx) => (
+                              <div key={`r-${i}-${idx}`} className="mb-1 last:mb-0">
+                                • {r?.text || r?.insight || String(r)}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {!!(m.insight?.recommendations || []).length && (
+                          <div className="rounded-lg border border-emerald-100 bg-white/95 p-2 shadow-sm">
+                            <div className="text-[11px] font-semibold text-slate-700 mb-1">Recommendations</div>
+                            {(m.insight.recommendations || []).slice(0, 3).map((rec, idx) => (
+                              <div key={`rec-${i}-${idx}`} className="mb-1 last:mb-0">
+                                • {rec?.text || rec?.insight || String(rec)}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
                   </div>
                 ))}
-
-                {(latestInsight || (latestCharts && latestCharts.length > 0)) && (
-                  <div className="rounded-lg border border-purple-100 bg-purple-50/80 p-2.5 text-xs text-gray-800 space-y-2">
-                    <div className="font-semibold text-purple-900">Insights & visuals</div>
-
-                    <AiChatContextStrip
-                      charts={latestCharts}
-                      kpisSnapshot={latestInsight?.kpis || []}
-                      maxCharts={2}
-                    />
-
-                    {!!(latestInsight?.trends || []).length && (
-                      <div className="rounded border border-blue-100 bg-white p-2">
-                        <div className="text-[11px] font-semibold text-gray-700 mb-1">Trends</div>
-                        {(latestInsight.trends || []).slice(0, 3).map((t, idx) => (
-                          <div key={`t-${idx}`} className="mb-1 last:mb-0">
-                            • {t?.text || t?.insight || String(t)}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {!!(latestInsight?.risks || []).length && (
-                      <div className="rounded border border-red-100 bg-white p-2">
-                        <div className="text-[11px] font-semibold text-gray-700 mb-1">Risks</div>
-                        {(latestInsight.risks || []).slice(0, 3).map((r, idx) => (
-                          <div key={`r-${idx}`} className="mb-1 last:mb-0">
-                            • {r?.text || r?.insight || String(r)}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {!!(latestInsight?.recommendations || []).length && (
-                      <div className="rounded border border-green-100 bg-white p-2">
-                        <div className="text-[11px] font-semibold text-gray-700 mb-1">Recommendations</div>
-                        {(latestInsight.recommendations || []).slice(0, 3).map((rec, idx) => (
-                          <div key={`rec-${idx}`} className="mb-1 last:mb-0">
-                            • {rec?.text || rec?.insight || String(rec)}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                  </div>
-                )}
               </div>
 
-              <div className="mt-2 flex gap-2 items-stretch shrink-0">
+              <div className="mt-2 flex gap-2 items-stretch shrink-0 pt-1 border-t border-slate-200/80">
                 <TextField
                   size="small"
                   fullWidth
-                  placeholder="Ask anything in plain language…"
+                  placeholder="Message in plain language…"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -629,7 +657,17 @@ const GlobalChatbot = () => {
                   variant="contained"
                   onClick={handleSend}
                   disabled={chatLoading}
-                  sx={{ minHeight: "40px", height: "40px" }}
+                  sx={{
+                    minHeight: "40px",
+                    height: "40px",
+                    borderRadius: "12px",
+                    minWidth: 84,
+                    textTransform: "none",
+                    fontWeight: 600,
+                    background: "linear-gradient(135deg, #7c3aed 0%, #2563eb 100%)",
+                    boxShadow: "none",
+                    "&:hover": { boxShadow: "0 4px 14px rgba(59,130,246,0.25)" },
+                  }}
                 >
                   {chatLoading ? <CircularProgress size={16} color="inherit" /> : "Send"}
                 </Button>

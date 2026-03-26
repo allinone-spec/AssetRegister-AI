@@ -2,14 +2,36 @@ import React, { useEffect, useState, useCallback } from "react";
 import { Button, Chip, FormControl, InputLabel, MenuItem, Select } from "@mui/material";
 import { setHeadingTitle } from "../redux/Slices/HeadingTitle";
 import { useDispatch, useSelector } from "react-redux";
+import { Settings2, Shield } from "lucide-react";
 import { analyzeDataset, fetchAiModels, invalidateAnalysisCache } from "../Service/ai.service";
 import AdminConsoleHomeInsights from "../Components/Common/AdminConsoleHomeInsights";
 import PageLayout from "../Components/Common/PageLayout";
 import { ChangeTrackingFilter } from "../Components/Common/ChangeTrackingFilter";
 import { tableNameEnum } from "../Components/core/DataConsole/data";
 import { buildAdminConsoleOverviewPayload } from "../Utility/aiConsolePayloads";
+import {
+  AR_FONT,
+  arCard,
+  arEyebrow,
+  arPageSub,
+  arPageTitle,
+  arTypeBadge,
+  arInputSurface,
+} from "../Components/Common/consoleWelcomeTheme";
 
 const ADMIN_HOME_IMPORT_TREND_KEY = "ar-admin-home-import-trend";
+
+const selectSx = {
+  minWidth: 220,
+  "& .MuiOutlinedInput-root": {
+    borderRadius: "11px",
+    backgroundColor: arInputSurface,
+    fontFamily: AR_FONT,
+    "& fieldset": { borderColor: "rgba(111,47,225,0.12)" },
+    "&:hover fieldset": { borderColor: "rgba(111,47,225,0.22)" },
+    "&.Mui-focused fieldset": { borderColor: "#6f2fe1", borderWidth: "1.5px" },
+  },
+};
 
 function readStoredImportTrendFilter() {
   try {
@@ -140,34 +162,57 @@ const AdminConsoleWelcomePage = ({ userName = "" }) => {
   const xd = importTrendFilter?.xDaysFilter;
 
   return (
-    <PageLayout className="!bg-gradient-to-br from-violet-50/50 via-white to-white border border-violet-100/60 shadow-sm">
-      <div className="min-h-[82vh] overflow-auto p-4 md:p-6">
-        <div className="max-w-7xl mx-auto space-y-5">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div>
-              <h1 className="text-2xl md:text-3xl font-bold text-gray-900 tracking-tight">Admin Console</h1>
-              <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-                Hi {userName || "there"} — operational snapshot across Import Status, Saved Jobs, AR Mapping, and AR
-                Rules. Uses the same <strong>object</strong> selector as the header. Optional: limit{" "}
-                <strong>Import Status</strong> rows by date columns and last N days (same control as Import Status
-                grid — <code className="text-xs bg-gray-100 px-1 rounded">ImportStatus</code> columns).
-              </p>
-              <p className="text-xs text-violet-800 font-medium mt-2">
-                Current scope: <span className="text-gray-800">{objectScopeLabel}</span>
-              </p>
+    <PageLayout className="!min-h-full !rounded-none border-0 !bg-[#f7f5ff] shadow-none">
+      <div className="min-h-[82vh] overflow-auto px-5 py-6 md:px-7 md:py-8" style={{ fontFamily: AR_FONT }}>
+        <div className="mx-auto max-w-7xl space-y-4 md:space-y-5">
+          <div className={`p-5 md:p-6 ${arCard}`}>
+            <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+              <div className="flex min-w-0 gap-4">
+                <div className="hidden h-12 w-12 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-[#6f2fe1] to-[#5a26c7] text-white shadow-[0_3px_10px_rgba(111,47,225,0.35)] sm:flex">
+                  <Shield size={24} strokeWidth={2} aria-hidden />
+                </div>
+                <div className="min-w-0">
+                  <p className={`${arEyebrow} mb-1.5`}>Admin console</p>
+                  <h1 className={`${arPageTitle} mb-1.5`}>Admin Console</h1>
+                  <p className={`${arPageSub} max-w-2xl`}>
+                    <span className="font-semibold text-[#6b7280]">Hi {userName || "there"}.</span> Snapshot across
+                    Import Status, Saved Jobs, AR Mapping, and AR Rules. Optional: narrow Import Status by date columns
+                    and last N days (same as the Import Status grid —{" "}
+                    <code
+                      className="rounded px-1 py-0.5 text-[11px] font-medium"
+                      style={{ fontFamily: "DM Mono, monospace", background: "rgba(111,47,225,0.09)" }}
+                    >
+                      ImportStatus
+                    </code>
+                    ).
+                  </p>
+                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                    <span className={arTypeBadge}>
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#6f2fe1]" aria-hidden />
+                      Scope: <span className="text-[#1a1028]">{objectScopeLabel}</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
+          </div>
+
+          <div className={`flex flex-col gap-3 p-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between ${arCard}`}>
             <div className="flex flex-wrap items-center gap-2">
               {aiModels.length > 0 && (
-                <FormControl size="small" sx={{ minWidth: 220 }}>
-                  <InputLabel id="admin-home-ai-model-label">Cloud AI</InputLabel>
+                <FormControl size="small" sx={selectSx}>
+                  <InputLabel id="admin-home-ai-model-label" sx={{ fontFamily: AR_FONT }}>
+                    Model
+                  </InputLabel>
                   <Select
                     labelId="admin-home-ai-model-label"
-                    label="Cloud AI"
+                    label="Model"
                     value={selectedModelId || aiModels[0]?.id || ""}
                     onChange={(e) => setSelectedModelId(e.target.value)}
+                    sx={{ fontFamily: AR_FONT, fontSize: "13px" }}
                   >
                     {aiModels.map((m) => (
-                      <MenuItem key={m.id} value={m.id}>
+                      <MenuItem key={m.id} value={m.id} sx={{ fontFamily: AR_FONT }}>
                         {m.label || m.id}
                       </MenuItem>
                     ))}
@@ -176,54 +221,89 @@ const AdminConsoleWelcomePage = ({ userName = "" }) => {
               )}
               <Button
                 variant="outlined"
-                size="small"
+                size="medium"
+                startIcon={<Settings2 size={16} />}
                 onClick={() => setChangeTrackingOpen(true)}
                 disabled={aiLoading}
-                sx={{ textTransform: "none" }}
+                sx={{
+                  textTransform: "none",
+                  fontWeight: 700,
+                  borderRadius: "11px",
+                  fontFamily: AR_FONT,
+                  borderColor: "rgba(111,47,225,0.22)",
+                  color: "#5b21b6",
+                  px: 2,
+                  "&:hover": { borderColor: "#6f2fe1", bgcolor: "rgba(111,47,225,0.06)" },
+                }}
               >
-                Import days filter…
+                Import days filter
               </Button>
               <Button
                 variant="contained"
-                size="small"
+                size="medium"
                 onClick={() => runAdminOverviewAnalysis(true)}
                 disabled={aiLoading}
                 sx={{
-                  borderRadius: "999px",
+                  borderRadius: "11px",
                   textTransform: "none",
-                  fontWeight: 600,
-                  px: 2,
-                  boxShadow: "none",
-                  background: "linear-gradient(135deg, #6f2fe1 0%, #2563eb 100%)",
-                  "&:hover": { boxShadow: "0 6px 16px rgba(111,47,225,0.25)" },
+                  fontWeight: 700,
+                  fontFamily: AR_FONT,
+                  px: 2.5,
+                  boxShadow: "0 4px 14px rgba(111,47,225,0.35)",
+                  background: "linear-gradient(135deg, #6f2fe1, rgba(111,47,225,0.82))",
+                  "&:hover": { boxShadow: "0 6px 18px rgba(111,47,225,0.4)" },
                 }}
               >
-                Refresh
+                Refresh insights
               </Button>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className={`flex flex-wrap items-center gap-2 px-1 ${arCard} !p-3`}>
             {xd ? (
               <>
                 <Chip
                   size="small"
-                  color="secondary"
+                  label={`Import Status · last ${xd.xDays} day(s)`}
+                  sx={{
+                    fontFamily: AR_FONT,
+                    fontWeight: 700,
+                    fontSize: "11px",
+                    borderRadius: "99px",
+                    borderColor: "rgba(111,47,225,0.22)",
+                    bgcolor: arInputSurface,
+                    color: "#5b21b6",
+                  }}
                   variant="outlined"
-                  label={`Import Status: last ${xd.xDays} day(s)`}
                 />
                 <Chip
                   size="small"
                   variant="outlined"
-                  label={String(xd.columnNames || "").split(",").filter(Boolean).slice(0, 4).join(", ")}
                   title={String(xd.columnNames || "")}
+                  label={String(xd.columnNames || "")
+                    .split(",")
+                    .filter(Boolean)
+                    .slice(0, 3)
+                    .join(", ")}
+                  sx={{
+                    fontFamily: "DM Mono, ui-monospace, monospace",
+                    fontSize: "10px",
+                    borderRadius: "99px",
+                    maxWidth: 280,
+                  }}
                 />
-                <Button size="small" onClick={handleRemoveImportTrend} sx={{ textTransform: "none" }}>
-                  Clear days filter
+                <Button
+                  size="small"
+                  onClick={handleRemoveImportTrend}
+                  sx={{ textTransform: "none", fontWeight: 700, fontFamily: AR_FONT, color: "#6b7280" }}
+                >
+                  Clear filter
                 </Button>
               </>
             ) : (
-              <span className="text-xs text-gray-500">No import date window — all Import Status rows (API default).</span>
+              <span className="text-xs font-medium text-[#9ca3af]">
+                No import date window — all Import Status rows (API default).
+              </span>
             )}
           </div>
 

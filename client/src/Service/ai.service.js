@@ -51,11 +51,32 @@ export const clearGlobalChatSession = async (payload) => {
   return response.data;
 };
 
+/** Admin: load configurable LLM system prompts (defaults + overrides). */
+export const fetchPromptConfig = async () => {
+  const response = await aiApi.get("/prompt-config");
+  return response.data;
+};
+
+/** Admin: save or clear (null / blank removes override) prompt sections. */
+export const savePromptConfig = async (payload) => {
+  const response = await aiApi.put("/prompt-config", payload);
+  return response.data;
+};
+
 /**
  * Clear same-day backend chat session for the current user/page.
  */
 export const clearChatSession = async (payload) => {
   const response = await aiApi.post("/chat/clear", payload);
+  return response.data;
+};
+
+/**
+ * Clear only the chat thread (messages) for this user/page/dataset.
+ * Keeps insight feedback (helpful / not helpful / irrelevant) for the session.
+ */
+export const clearChatThread = async (payload) => {
+  const response = await aiApi.post("/chat/clear-thread", payload);
   return response.data;
 };
 

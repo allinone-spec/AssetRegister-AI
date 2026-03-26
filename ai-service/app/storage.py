@@ -65,6 +65,12 @@ class AIStateStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (day_key, dataset_key)
                 );
+
+                CREATE TABLE IF NOT EXISTS app_prompts (
+                    prompt_key TEXT PRIMARY KEY,
+                    body TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -293,3 +299,34 @@ class AIStateStore:
                 """,
                 (day_key, org_id, user_id, page_id, dataset_key),
             )
+
+    def get_app_prompt(self, prompt_key: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT body FROM app_prompts WHERE prompt_key = ?",
+                (prompt_key,),
+            ).fetchone()
+        return str(row["body"]) if row and row["body"] is not None else None
+
+    def set_app_prompt(self, prompt_key: str, body: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_prompts (prompt_key, body, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(prompt_key) DO UPDATE SET
+                    body = excluded.body,
+                    updated_at = excluded.updated_at
+                """,
+                (prompt_key, body, now),
+            )
+
+    def delete_app_prompt(self, prompt_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM app_prompts WHERE prompt_key = ?", (prompt_key,))
+
+    def list_app_prompt_keys(self) -> List[str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT prompt_key FROM app_prompts ORDER BY prompt_key").fetchall()
+        return [str(r["prompt_key"]) for r in rows]

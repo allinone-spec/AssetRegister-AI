@@ -41,6 +41,8 @@ import {
   ChevronLeft,
   Search,
   Clock,
+  Sparkles,
+  MessageSquareText,
 } from "lucide-react";
 import { useTheme } from "../../ThemeContext";
 import { FaEdit, FaObjectGroup } from "react-icons/fa";
@@ -95,10 +97,16 @@ import {
   analyzeDataset,
   chatWithData,
   clearChatSession,
+  clearChatThread,
   submitInsightFeedback,
   invalidateAnalysisCache,
   fetchAiModels,
 } from "../../Service/ai.service";
+import {
+  loadHiddenInsightIds,
+  persistHiddenInsightIds,
+  clearHiddenInsightIds,
+} from "../../Utils/aiSessionInsightPrefs";
 import AiInsightContent from "./AiInsightContent";
 import AiChatAssistantMessage from "./AiChatAssistantMessage";
 import { normalizeKpiTitle } from "../../Utils/aiChatKpiExtract";
@@ -967,6 +975,34 @@ const DataTable = ({
     pathname === "/data-console/reports/by-ar-resource" ||
     pathname.startsWith("/data-console/reports/by-ar-resource/jobs/") ||
     pathname === "/data-console/register/detailed";
+
+  const AI_INSIGHT_DRILL_MAX = 8000;
+  const aiInsightDrillDown = useMemo(() => {
+    if (!isAiSupportedPage || !Array.isArray(tableData) || tableData.length === 0) return null;
+    const total = tableData.length;
+    const rows = total > AI_INSIGHT_DRILL_MAX ? tableData.slice(0, AI_INSIGHT_DRILL_MAX) : tableData;
+    const loadAllRows =
+      typeof fetchAllSourceData === "function"
+        ? async () => {
+            try {
+              const all = await fetchAllSourceData();
+              if (!Array.isArray(all) || !all.length) return [];
+              return all.length > AI_INSIGHT_DRILL_MAX ? all.slice(0, AI_INSIGHT_DRILL_MAX) : all;
+            } catch {
+              return [];
+            }
+          }
+        : undefined;
+    return {
+      rows,
+      loadAllRows,
+      caption: jobName
+        ? `Report grid — ${jobName}${dashboardData?.dataSource ? ` (${dashboardData.dataSource})` : ""}`
+        : "Report / register grid (this page)",
+      truncated: total > AI_INSIGHT_DRILL_MAX,
+      totalRowCount: total,
+    };
+  }, [isAiSupportedPage, tableData, jobName, dashboardData?.dataSource, fetchAllSourceData]);
   const showAnalyzeButton =
     isAiSupportedPage &&
     pathname !== "/data-console/reports/original-source" &&
@@ -2013,24 +2049,26 @@ const DataTable = ({
       return;
     }
     const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const category = dashboardData?.tableType || "generic";
     const basePayload = {
       orgId: user?.orgId || "default-org",
       userId: user?.id || "anonymous",
       pageId,
-      category: dashboardData?.tableType || "generic",
+      category,
       filters: buildAiFilters(),
     };
     setAiError("");
     setChatHistory([]);
     setChatInput("");
-    setHiddenInsightIds([]);
+    const persistedHidden = loadHiddenInsightIds(user?.id, pageId, category);
+    setHiddenInsightIds(persistedHidden);
     setQueuedKpiRequests([]);
     setKpiTitleActions({});
     setAiDialogOpen(true);
     try {
-      await clearChatSession(basePayload);
+      await clearChatThread(basePayload);
     } catch (error) {
-      console.error("Failed to reset AI session on Analyze click:", error);
+      console.error("Failed to reset AI chat thread on Analyze click:", error);
     }
     await handleRunAnalysis();
   };
@@ -2139,12 +2177,13 @@ const DataTable = ({
   const handleInsightFeedback = async (insightId, insightType, feedbackType, comment) => {
     if (!isAiSupportedPage) return;
     const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const category = dashboardData?.tableType || "generic";
 
     const basePayloadForFeedback = {
       orgId: user?.orgId || "default-org",
       userId: user?.id || "anonymous",
       pageId,
-      category: dashboardData?.tableType || "generic",
+      category,
       filters: buildAiFilters(),
     };
     try {
@@ -2156,9 +2195,19 @@ const DataTable = ({
         useful: feedbackType === "helpful",
         comment: comment || undefined,
       });
-      // Only "Irrelevant" hides immediately. "Not helpful" is kept visible so refresh can re-run analysis with feedback.
       if (feedbackType === "irrelevant") {
-        setHiddenInsightIds((prev) => (prev.includes(insightId) ? prev : [...prev, insightId]));
+        setHiddenInsightIds((prev) => {
+          const next = prev.includes(insightId) ? prev : [...prev, insightId];
+          persistHiddenInsightIds(user?.id, pageId, category, next);
+          return next;
+        });
+        toast.success("Hidden for this session. It will stay hidden until you clear insight memory.");
+      } else if (feedbackType === "not_helpful") {
+        toast.success(
+          "Saved for this session. Use Refresh insights to regenerate with your changes.",
+        );
+      } else if (feedbackType === "helpful") {
+        toast.success("Thanks — we will emphasize deeper follow-ons in this area on the next refresh.");
       }
       if (insightType === "kpi") {
         const match = /^kpi-(\d+)$/.exec(String(insightId || ""));
@@ -2322,11 +2371,13 @@ const DataTable = ({
     setKpiTitleActions({});
     try {
       const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+      const category = dashboardData?.tableType || "generic";
+      clearHiddenInsightIds(user?.id, pageId, category);
       const payload = {
         orgId: user?.orgId || "default-org",
         userId: user?.id || "anonymous",
         pageId,
-        category: dashboardData?.tableType || "generic",
+        category,
         filters: buildAiFilters(),
       };
       await clearChatSession(payload);
@@ -2678,17 +2729,19 @@ const DataTable = ({
                   </div>
                   {showAnalyzeButton && (
                     <div className="relative group">
-                      <FiZap
-                        sx={{ color: textWhiteColor, backgroundColor }}
-                        className="cursor-pointer text-purple-600"
-                        onClick={handleOpenAiDialog}
-                        size={24}
-                      />
+                      <div className="rounded-xl p-1.5 ring-1 ring-violet-200/70 bg-white/90 shadow-sm hover:ring-violet-400/80 hover:bg-violet-50/60 transition-all">
+                        <FiZap
+                          sx={{ color: textWhiteColor, backgroundColor }}
+                          className="cursor-pointer text-violet-600"
+                          onClick={handleOpenAiDialog}
+                          size={24}
+                        />
+                      </div>
                       <div
                         style={{ backgroundColor }}
                         className="absolute bottom-full left-1/2 transform -translate-x-1/2  text-white p-2 rounded-md text-sm whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity duration-300"
                       >
-                        Analyze with AI
+                        AI insights & chat
                       </div>
                     </div>
                   )}
@@ -3098,27 +3151,44 @@ const DataTable = ({
         onClose={() => setAiDialogOpen(false)}
         fullWidth
         maxWidth="lg"
+        scroll="paper"
+        slotProps={{
+          paper: {
+            className: "rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80",
+            sx: { backgroundImage: "linear-gradient(180deg, #fafafa 0%, #ffffff 120px)" },
+          },
+        }}
       >
-        <DialogTitle className="flex items-center justify-between gap-2 pr-1">
-          <span>AI Insights</span>
+        <DialogTitle className="!flex !flex-row !items-start !justify-between !gap-3 !pr-2 !pb-3 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 text-white shadow-md">
+          <div className="flex items-start gap-3 min-w-0">
+            <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/15 ring-1 ring-white/25">
+              <Sparkles className="text-white" size={22} strokeWidth={1.75} aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <span className="block text-lg font-semibold tracking-tight leading-tight">AI insights</span>
+              <span className="block text-xs font-normal text-violet-100/95 mt-1 leading-snug">
+                Structured analysis for this grid, then conversational follow-up on the same data.
+              </span>
+            </div>
+          </div>
           <IconButton
             size="small"
             onClick={() => setAiDialogOpen(false)}
             aria-label="Close AI Insights"
-            sx={{ ml: "auto" }}
+            sx={{ ml: 0, color: "rgba(255,255,255,0.92)", "&:hover": { bgcolor: "rgba(255,255,255,0.12)" } }}
           >
             <X size={20} />
           </IconButton>
         </DialogTitle>
-        <DialogContent dividers>
+        <DialogContent dividers className="!border-slate-200/80 !bg-slate-50/30">
           {aiModels.length > 0 && (
-            <div className="mb-4">
+            <div className="mb-4 rounded-xl border border-slate-200/90 bg-white px-3 py-3 shadow-sm">
               <FormControl size="small" sx={{ minWidth: 260 }}>
-                <InputLabel id="ai-model-label">Cloud AI</InputLabel>
+                <InputLabel id="ai-model-label">Model</InputLabel>
                 <Select
                   labelId="ai-model-label"
                   value={selectedModelId || aiModels[0]?.id || ""}
-                  label="Cloud AI"
+                  label="Model"
                   onChange={(e) => setSelectedModelId(e.target.value)}
                 >
                   {aiModels.map((m) => (
@@ -3131,12 +3201,21 @@ const DataTable = ({
             </div>
           )}
           {aiError && (
-            <div className="mb-4 text-red-600 text-sm">{aiError}</div>
+            <div
+              className="mb-4 flex gap-3 rounded-xl border border-red-200/90 bg-red-50/95 px-4 py-3 text-sm text-red-900 shadow-sm"
+              role="alert"
+            >
+              <span className="shrink-0 font-semibold">Error</span>
+              <span className="leading-relaxed">{aiError}</span>
+            </div>
           )}
           {!aiError && aiLoading && (
-            <div className="flex items-center gap-2 text-sm text-gray-600">
-              <CircularProgress size={18} />
-              <span>{currentAiStageMessage}</span>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-4 rounded-2xl border border-violet-100 bg-white px-5 py-8 text-sm text-slate-600 shadow-sm">
+              <CircularProgress size={28} sx={{ color: "#7c3aed" }} />
+              <div>
+                <div className="font-semibold text-slate-800">Working on your analysis</div>
+                <div className="text-slate-600 mt-0.5">{currentAiStageMessage}</div>
+              </div>
             </div>
           )}
           {!aiLoading && aiResult && (
@@ -3145,12 +3224,20 @@ const DataTable = ({
               pathname={pathname}
               onInsightFeedback={handleInsightFeedback}
               hiddenInsightIds={hiddenInsightIds}
+              drillDown={aiInsightDrillDown}
             />
           )}
-          <div className="mt-6 border-t border-gray-200 pt-4">
-            <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-              <h3 className="font-semibold text-base text-gray-800">Chat with this data</h3>
-              <div className="flex items-center gap-2">
+          <div className="mt-6 rounded-2xl border border-slate-200/90 bg-white p-4 md:p-5 shadow-sm ring-1 ring-slate-100/80">
+            <div className="flex items-center gap-2 mb-3 text-slate-800">
+              <MessageSquareText className="text-violet-600 shrink-0" size={20} strokeWidth={1.75} aria-hidden />
+              <h3 className="font-semibold text-base">Chat with this data</h3>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <p className="text-xs text-slate-500 max-w-xl leading-relaxed">
+                Follow-up questions use the same session context as the insights above. Refresh regenerates the full
+                analysis.
+              </p>
+              <div className="flex items-center gap-2 shrink-0">
                 <Button
                   variant="contained"
                   size="small"
@@ -3189,32 +3276,32 @@ const DataTable = ({
                     },
                   }}
                 >
-                  Clear Memory
+                  Clear memory
                 </Button>
               </div>
             </div>
-            <div className="min-h-[300px] max-h-[380px] overflow-y-auto rounded-2xl border border-slate-200 bg-gradient-to-b from-slate-50 to-white p-4 mb-3 shadow-inner text-sm">
+            <div className="min-h-[300px] max-h-[380px] overflow-y-auto rounded-xl border border-slate-200/80 bg-gradient-to-b from-slate-50/90 to-white p-4 mb-3 shadow-inner text-sm [scrollbar-width:thin]">
               {chatHistory.length === 0 && (
-                <div className="text-gray-500 text-sm py-8 text-center">
-                  Ask questions like “What changed since the last import?” or
-                  “Which items look risky?”.
+                <div className="text-slate-500 text-sm py-10 text-center px-4 leading-relaxed max-w-md mx-auto">
+                  <span className="block text-violet-600/90 font-medium mb-1">Start the conversation</span>
+                  Try “What changed since the last import?” or “Which rows look risky and why?”
                 </div>
               )}
               {chatHistory.map((m, idx) => (
                 <div
                   key={idx}
-                  className={`mb-3 last:mb-0 p-2.5 rounded-lg ${
+                  className={`mb-3 last:mb-0 p-3 rounded-xl ${
                     m.role === "user"
-                      ? "bg-blue-50 border border-blue-100 text-blue-900 ml-4 shadow-sm"
-                      : "bg-white border border-slate-200 text-gray-800 mr-4 shadow-sm"
+                      ? "bg-gradient-to-br from-sky-50 to-blue-50/80 border border-sky-200/60 text-sky-950 ml-3 sm:ml-8 shadow-sm"
+                      : "bg-white border border-slate-200/90 text-slate-800 mr-3 sm:mr-8 shadow-sm"
                   }`}
                 >
                   {m.role === "user" ? (
                     <>
-                      <span className="font-semibold text-xs uppercase tracking-wide opacity-80 block mb-1">
+                      <span className="font-semibold text-[10px] uppercase tracking-wider text-sky-800/80 block mb-1.5">
                         You
                       </span>
-                      <span className="whitespace-pre-wrap break-words block">{m.content}</span>
+                      <span className="whitespace-pre-wrap break-words block leading-relaxed">{m.content}</span>
                     </>
                   ) : (
                     <AiChatAssistantMessage
@@ -3229,8 +3316,8 @@ const DataTable = ({
             <div className="flex gap-2 items-stretch">
               <input
                 type="text"
-                className="flex-1 border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none transition bg-white"
-                placeholder="Ask anything about this table..."
+                className="flex-1 border border-slate-300/90 rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500 outline-none transition bg-white shadow-sm placeholder:text-slate-400"
+                placeholder="Ask anything about this table…"
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => {
@@ -3246,15 +3333,23 @@ const DataTable = ({
                 size="small"
                 onClick={handleChatSend}
                 disabled={chatLoading}
-                sx={{ minWidth: 88, height: "42px", minHeight: "42px" }}
+                sx={{
+                  minWidth: 92,
+                  height: "42px",
+                  minHeight: "42px",
+                  borderRadius: "12px",
+                  textTransform: "none",
+                  fontWeight: 600,
+                  background: "linear-gradient(135deg, #7c3aed 0%, #2563eb 100%)",
+                  boxShadow: "none",
+                  "&:hover": { boxShadow: "0 6px 16px rgba(59,130,246,0.28)" },
+                }}
               >
-                {chatLoading ? "Sending..." : "Send"}
+                {chatLoading ? "Sending…" : "Send"}
               </Button>
             </div>
-            <div className="mt-4">
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Focus columns (optional)
-              </label>
+            <div className="mt-4 pt-4 border-t border-slate-100">
+              <label className="block text-xs font-semibold text-slate-600 mb-1.5">Focus columns (optional)</label>
               <Autocomplete
                 multiple
                 size="small"
@@ -3264,14 +3359,14 @@ const DataTable = ({
                 renderInput={(params) => (
                   <TextField
                     {...params}
-                    placeholder="Type to search, select columns..."
+                    placeholder="Search and select columns to emphasize…"
                     variant="outlined"
                   />
                 )}
-                sx={{ "& .MuiOutlinedInput-root": { py: 0.5 } }}
+                sx={{ "& .MuiOutlinedInput-root": { py: 0.5, borderRadius: "12px", bgcolor: "#fff" } }}
               />
-              <p className="text-xs text-gray-500 mt-1">
-                Select columns to emphasize in preprocessing and insights. Feedback and chat also tailor analysis.
+              <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
+                Shapes preprocessing and insights. Feedback you give on cards is also remembered for this session.
               </p>
             </div>
           </div>
