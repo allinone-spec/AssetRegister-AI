@@ -852,9 +852,9 @@ const ChartCard = ({ chart, chartIndex, onInsightFeedback, onDrillDown }) => {
           <div className="text-xs text-gray-500 capitalize">{chartType} visualization</div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-purple-50 text-purple-700">
-            {chartType}
-          </span>
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-purple-50 text-purple-700">
+          {chartType}
+        </span>
           <InsightFeedbackMenu
             insightId={insightId}
             insightType="chart"
@@ -936,7 +936,7 @@ const NarrativeBlock = ({
                 insightType={sectionKey}
                 onInsightFeedback={onInsightFeedback}
               />
-            </li>
+          </li>
           );
         })}
       </ul>
@@ -968,7 +968,7 @@ const MaturityCard = ({ maturityScore, onInsightFeedback, onDrillDown, reportRow
       }`}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="text-sm font-semibold mb-3 text-gray-900">System Health</div>
+      <div className="text-sm font-semibold mb-3 text-gray-900">System Health</div>
         <InsightFeedbackMenu insightId="maturity" insightType="maturity" onInsightFeedback={onInsightFeedback} />
       </div>
       <div className="flex items-center gap-3">
@@ -996,8 +996,8 @@ const AtAGlanceCard = ({ items, onInsightFeedback, hiddenInsightIds, onDrillDown
           const lineText = atAGlanceItemText(item);
           const traceCat = atAGlanceTracingCategory(item);
           return (
-            <li
-              key={`overview-${index}`}
+          <li
+            key={`overview-${index}`}
               role={drillable ? "button" : undefined}
               tabIndex={drillable ? 0 : undefined}
               onClick={
@@ -1036,7 +1036,7 @@ const AtAGlanceCard = ({ items, onInsightFeedback, hiddenInsightIds, onDrillDown
                 insightType="atAGlance"
                 onInsightFeedback={onInsightFeedback}
               />
-            </li>
+          </li>
           );
         })}
       </ul>
@@ -1080,8 +1080,8 @@ const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds, onDrill
         const blob = `${item.title || ""} ${item.text || item.insight || ""}`;
         const traceCat = inferTracingDrillCategoryFromText(blob);
         return (
-          <div
-            key={`${item.title || "total"}-${index}`}
+        <div
+          key={`${item.title || "total"}-${index}`}
             role={drillable ? "button" : undefined}
             tabIndex={drillable ? 0 : undefined}
             onClick={
@@ -1111,27 +1111,27 @@ const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds, onDrill
             className={`border rounded-xl p-4 bg-white shadow-sm space-y-2 min-w-0 overflow-hidden ${
               drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60 transition-shadow" : ""
             }`}
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="font-semibold text-sm text-gray-900 break-words min-w-0">
-                {item.title || `Insight ${index + 1}`}
-              </div>
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="font-semibold text-sm text-gray-900 break-words min-w-0">
+              {item.title || `Insight ${index + 1}`}
+            </div>
               <div className="flex items-center gap-1 shrink-0">
-                <SeverityBadge severity={item.severity} />
+            <SeverityBadge severity={item.severity} />
                 <InsightFeedbackMenu
                   insightId={insightId}
                   insightType="totalInsight"
                   onInsightFeedback={onInsightFeedback}
                 />
               </div>
-            </div>
-            <div className="text-sm text-gray-700 leading-6 break-words">
-              {item.text || item.insight}
-            </div>
+          </div>
+          <div className="text-sm text-gray-700 leading-6 break-words">
+            {item.text || item.insight}
+          </div>
             {drillable && (
               <div className="text-[11px] font-medium text-violet-700 pt-1">Click for underlying data</div>
             )}
-          </div>
+        </div>
         );
       })}
     </div>
@@ -1202,46 +1202,46 @@ const InsightList = ({
                   : undefined
               }
               className={`p-4 space-y-2 ${drillable ? "cursor-pointer hover:bg-slate-50/80" : ""}`}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="font-semibold text-sm text-gray-900 break-words">
-                    {type === "column"
-                      ? item.column || `Column ${index + 1}`
-                      : item.issue || `Row insight ${index + 1}`}
-                  </div>
-                  <div className="text-[11px] text-gray-500">
-                    {type === "column"
-                      ? "Column-level quality and operational meaning"
-                      : "Row-level issue pattern and operational effect"}
-                  </div>
-                </div>
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-semibold text-sm text-gray-900 break-words">
+                {type === "column"
+                  ? item.column || `Column ${index + 1}`
+                  : item.issue || `Row insight ${index + 1}`}
+              </div>
+              <div className="text-[11px] text-gray-500">
+                {type === "column"
+                  ? "Column-level quality and operational meaning"
+                  : "Row-level issue pattern and operational effect"}
+              </div>
+            </div>
                 <div className="flex items-center gap-1 shrink-0">
-                  <SeverityBadge severity={item.severity || (type === "row" ? "medium" : "low")} />
+            <SeverityBadge severity={item.severity || (type === "row" ? "medium" : "low")} />
                   <InsightFeedbackMenu
                     insightId={insightId}
                     insightType={type === "column" ? "columnInsight" : "rowInsight"}
                     onInsightFeedback={onInsightFeedback}
                   />
                 </div>
-              </div>
-              <div className="text-sm text-gray-700 leading-6 break-words">
-                {item.insight || item.text}
-              </div>
-              {type === "row" && item.operational_risk && (
-                <div className="text-xs text-red-700 bg-red-50 rounded-md px-3 py-2 leading-5 break-words">
-                  {item.operational_risk}
-                </div>
-              )}
-              {item.recommendation && (
-                <div className="text-xs text-blue-700 bg-blue-50 rounded-md px-3 py-2 leading-5 break-words">
-                  {item.recommendation}
-                </div>
-              )}
+          </div>
+          <div className="text-sm text-gray-700 leading-6 break-words">
+            {item.insight || item.text}
+          </div>
+          {type === "row" && item.operational_risk && (
+            <div className="text-xs text-red-700 bg-red-50 rounded-md px-3 py-2 leading-5 break-words">
+              {item.operational_risk}
+            </div>
+          )}
+          {item.recommendation && (
+            <div className="text-xs text-blue-700 bg-blue-50 rounded-md px-3 py-2 leading-5 break-words">
+              {item.recommendation}
+            </div>
+          )}
               {drillable && (
                 <div className="text-[11px] font-medium text-violet-700">Click for report data behind this insight</div>
               )}
-            </div>
+        </div>
           );
         })}
       </div>
@@ -2553,13 +2553,13 @@ const AiInsightContent = ({
       </div>
       {showKpis && (
         <section className="rounded-2xl border border-gray-200/90 bg-gradient-to-br from-slate-50 via-white to-white p-5 shadow-sm">
-          <div className="space-y-4">
-            <SectionHeader
+        <div className="space-y-4">
+          <SectionHeader
               title="KPIs & Data"
-              subtitle="Total dataset insights with the most important metrics and visual summaries."
-            />
-            {aiResult.kpis && (
-              <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+            subtitle="Total dataset insights with the most important metrics and visual summaries."
+          />
+          {aiResult.kpis && (
+            <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
                 {(aiResult.kpis || []).map((kpi, idx) => {
                   const insightId = `kpi-${idx}`;
                   if (hidden.has(insightId)) return null;
@@ -2607,31 +2607,31 @@ const AiInsightContent = ({
                       }`}
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div className="font-medium text-gray-800">{kpi.title}</div>
+                  <div className="font-medium text-gray-800">{kpi.title}</div>
                         <InsightFeedbackMenu
                           insightId={insightId}
                           insightType="kpi"
                           onInsightFeedback={onInsightFeedback}
                         />
                       </div>
-                      {kpi.value !== undefined && (
-                        <div className="text-xl font-semibold text-gray-900 mt-1 break-all">
-                          {kpi.value}
-                        </div>
-                      )}
-                      {kpi.description && (
-                        <div className="text-xs text-gray-600 mt-1 leading-5 break-words">
-                          {kpi.description}
-                        </div>
-                      )}
+                  {kpi.value !== undefined && (
+                    <div className="text-xl font-semibold text-gray-900 mt-1 break-all">
+                      {kpi.value}
+                    </div>
+                  )}
+                  {kpi.description && (
+                    <div className="text-xs text-gray-600 mt-1 leading-5 break-words">
+                      {kpi.description}
+                    </div>
+                  )}
                       {kpiDrillable && (
                         <div className="text-[11px] font-medium text-violet-700 pt-1">Click for underlying report data</div>
                       )}
-                    </li>
+                </li>
                   );
                 })}
-              </ul>
-            )}
+            </ul>
+          )}
             {/* KPI/Data overview excludes System Health and At A Glance (moved to dedicated panels). */}
             <TotalInsightCards
               items={aiResult.totalInsights}
@@ -2645,16 +2645,16 @@ const AiInsightContent = ({
               onInsightFeedback={onInsightFeedback}
               onDrillDown={openInsightDrillDown}
             />
-          </div>
-        </section>
+        </div>
+      </section>
       )}
 
       {showColumnInsights && (
-        <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm space-y-4">
-          <SectionHeader
-            title="Column Insights"
-            subtitle="Coverage for all provided columns, combining data quality observations and visual evidence."
-          />
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm space-y-4">
+        <SectionHeader
+          title="Column Insights"
+          subtitle="Coverage for all provided columns, combining data quality observations and visual evidence."
+        />
           <InsightList
             items={aiResult.columnInsights}
             type="column"
@@ -2664,15 +2664,15 @@ const AiInsightContent = ({
             reportRowsAvailable={reportRowsAvailable}
           />
           <ChartGrid charts={columnCharts} onInsightFeedback={onInsightFeedback} onDrillDown={openInsightDrillDown} />
-        </section>
+      </section>
       )}
 
       {showRowInsights && (
-        <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm space-y-4">
-          <SectionHeader
-            title="Row Insights"
-            subtitle="Coverage for row-level patterns and issue groups across the dataset."
-          />
+      <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm space-y-4">
+        <SectionHeader
+          title="Row Insights"
+          subtitle="Coverage for row-level patterns and issue groups across the dataset."
+        />
           <InsightList
             items={aiResult.rowInsights}
             type="row"
@@ -2682,7 +2682,7 @@ const AiInsightContent = ({
             reportRowsAvailable={reportRowsAvailable}
           />
           <ChartGrid charts={rowCharts} onInsightFeedback={onInsightFeedback} onDrillDown={openInsightDrillDown} />
-        </section>
+      </section>
       )}
 
       {showRegisterTracingCompare && (
@@ -2700,7 +2700,7 @@ const AiInsightContent = ({
             onInsightFeedback={onInsightFeedback}
             hiddenInsightIds={hiddenInsightIds}
           />
-        </section>
+      </section>
       )}
 
       {showImportDataTracing && (

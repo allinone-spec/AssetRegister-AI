@@ -45,9 +45,13 @@ class Settings(BaseSettings):
     azure_openai_2_endpoint: Optional[str] = None
     azure_openai_2_deployment: Optional[str] = None
     azure_openai_2_api_version: Optional[str] = None
-    # Optional OpenAI cloud (OPENAI_API_KEY, OPENAI_MODEL)
+    # OpenAI cloud API (same capabilities as Azure path via _llm_chat): OPENAI_API_KEY, OPENAI_MODEL
+    # Optional second model id with same key: OPENAI_MODEL_2
+    # Optional API base (default https://api.openai.com/v1): OPENAI_BASE_URL
     openai_api_key: Optional[str] = None
     openai_model: Optional[str] = None
+    openai_model_2: Optional[str] = None
+    openai_base_url: Optional[str] = None
     # Comma-separated CORS origins for production (e.g. https://app.example.com)
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
@@ -137,6 +141,7 @@ class GlobalChatSessionRequest(BaseModel):
     moduleKey: Optional[str] = None
     route: Optional[str] = None
     contextFilters: Dict[str, Any] = {}
+    modelId: Optional[str] = None
 
 
 class PromptConfigSection(BaseModel):
@@ -228,13 +233,29 @@ def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
             "provider": "openai",
             "label": f"OpenAI – {model}",
         })
+    if (
+        getattr(settings, "openai_api_key", None)
+        and getattr(settings, "openai_model_2", None)
+        and settings.openai_model_2 != getattr(settings, "openai_model", None)
+    ):
+        m2 = settings.openai_model_2
+        models.append({
+            "id": m2,
+            "provider": "openai",
+            "label": f"OpenAI (2) – {m2}",
+        })
     return models
 
 
 def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
     """Resolve model_id to config dict (provider, endpoint, deployment, api_key, etc.)."""
-    if not model_id:
-        model_id = settings.azure_openai_deployment
+    if not (model_id or "").strip():
+        models = _get_ai_models_list(settings)
+        if not models:
+            raise HTTPException(status_code=503, detail="No AI model is configured in .env.")
+        model_id = models[0]["id"]
+    else:
+        model_id = model_id.strip()
     if model_id == settings.azure_openai_deployment and settings.azure_openai_api_key:
         return {
             "provider": "azure_openai",
@@ -253,11 +274,17 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
             "api_version": getattr(settings, "azure_openai_2_api_version") or "2024-02-15-preview",
             "api_key": settings.azure_openai_2_api_key,
         }
-    if getattr(settings, "openai_model", None) and model_id == settings.openai_model:
+    if getattr(settings, "openai_model", None) and model_id == settings.openai_model and settings.openai_api_key:
         return {
             "provider": "openai",
-            "api_key": getattr(settings, "openai_api_key", None),
+            "api_key": settings.openai_api_key,
             "model": settings.openai_model,
+        }
+    if getattr(settings, "openai_model_2", None) and model_id == settings.openai_model_2 and settings.openai_api_key:
+        return {
+            "provider": "openai",
+            "api_key": settings.openai_api_key,
+            "model": settings.openai_model_2,
         }
     raise HTTPException(
         status_code=400,
@@ -2118,6 +2145,23 @@ def _extract_json_block(content: str) -> Dict[str, Any]:
         raise
 
 
+def _openai_chat_completions_url(settings: Settings) -> str:
+    base = (getattr(settings, "openai_base_url", None) or "https://api.openai.com/v1").rstrip("/")
+    return f"{base}/chat/completions"
+
+
+def _llm_chat_payload_for_openai(model: str, base_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Some OpenAI models use max_completion_tokens and omit temperature."""
+    out = dict(base_payload)
+    m = (model or "").lower()
+    if m.startswith("o1") or m.startswith("o3") or m.startswith("gpt-5"):
+        out.pop("temperature", None)
+        mt = out.pop("max_tokens", None)
+        if mt is not None:
+            out["max_completion_tokens"] = mt
+    return out
+
+
 def _llm_chat(
     settings: Settings,
     model_id: str,
@@ -2127,7 +2171,7 @@ def _llm_chat(
 ) -> str:
     cfg = _get_model_config(settings, model_id)
     provider = cfg.get("provider", "azure_openai")
-    payload = {"messages": messages, "temperature": 0.2, "max_tokens": max_tokens}
+    payload: Dict[str, Any] = {"messages": messages, "temperature": 0.2, "max_tokens": max_tokens}
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
@@ -2137,11 +2181,26 @@ def _llm_chat(
             raise HTTPException(status_code=503, detail="Azure OpenAI API key is not configured.")
         headers = {"Content-Type": "application/json", "api-key": api_key}
         url = _azure_chat_url(settings, model_id)
+        provider_label = "Azure OpenAI"
+        req_payload = payload
+    elif provider == "openai":
+        api_key = cfg.get("api_key")
+        if not api_key:
+            raise HTTPException(status_code=503, detail="OpenAI API key is not configured.")
+        model = cfg.get("model") or "gpt-4o-mini"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+        url = _openai_chat_completions_url(settings)
+        provider_label = "OpenAI"
+        req_payload = _llm_chat_payload_for_openai(model, payload)
+        req_payload["model"] = model
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+
     for attempt in range(2):
         try:
-                resp = requests.post(url, headers=headers, json=payload, timeout=180)
+            resp = requests.post(url, headers=headers, json=req_payload, timeout=180)
         except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"Failed to reach Azure OpenAI: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"Failed to reach {provider_label}: {exc}") from exc
         if resp.ok:
             data = resp.json()
             return (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
@@ -2152,28 +2211,12 @@ def _llm_chat(
                 continue
             raise HTTPException(
                 status_code=429,
-                    detail=f"Azure OpenAI is temporarily rate-limited. Wait about {retry_after} seconds.",
+                detail=f"{provider_label} is temporarily rate-limited. Wait about {retry_after} seconds.",
             )
-        raise HTTPException(status_code=502, detail=f"Azure OpenAI returned {resp.status_code}: {resp.text[:500]}")
-        raise HTTPException(status_code=429, detail="Azure OpenAI is temporarily rate-limited.")
-
-    if provider == "openai":
-        api_key = cfg.get("api_key")
-        if not api_key:
-            raise HTTPException(status_code=503, detail="OpenAI API key is not configured.")
-        payload["model"] = cfg.get("model", "gpt-4o")
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-        url = "https://api.openai.com/v1/chat/completions"
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=180)
-        except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"Failed to reach OpenAI: {exc}") from exc
-        if not resp.ok:
-            raise HTTPException(status_code=502, detail=f"OpenAI returned {resp.status_code}: {resp.text[:500]}")
-        data = resp.json()
-        return (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
-
-    raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"{provider_label} returned {resp.status_code}: {resp.text[:500]}",
+        )
 
 
 def _parse_ai_json_with_repair(settings: Settings, content: str, model_id: str) -> Dict[str, Any]:
@@ -4516,7 +4559,7 @@ def _ensure_daily_analysis(
 def list_models(settings: Settings = Depends(get_settings)) -> Dict[str, Any]:
     models = _get_ai_models_list(settings)
     if not models:
-        return {"provider": "azure_openai", "models": []}
+        return {"provider": "none", "models": []}
     return {"provider": models[0].get("provider", "azure_openai"), "models": models}
 
 
@@ -4675,7 +4718,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
 def clear_global_chat_session(payload: GlobalChatSessionRequest, settings: Settings = Depends(get_settings)):
     store = get_store()
     day_key = utc_day_key()
-    model_id = _model_id_or_default(None, settings)
+    model_id = _model_id_or_default(payload.modelId, settings)
     session_page_id, session_key = _global_chat_pseudo_analyze(
         payload.orgId,
         payload.userId,
@@ -4796,7 +4839,7 @@ def ai_feedback(payload: FeedbackRequest, settings: Settings = Depends(get_setti
         pageId=payload.pageId,
         category=payload.category or "feedback",
         filters=payload.filters or {},
-        modelId=settings.azure_openai_deployment,
+        modelId=_model_id_or_default(None, settings),
     )
     session_key = _session_dataset_key(pseudo)
     store.add_feedback(

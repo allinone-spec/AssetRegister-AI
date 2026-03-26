@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useSelector } from "react-redux";
-import { Button, CircularProgress, MenuItem, Select, TextField, Typography } from "@mui/material";
+import {
+  Button,
+  CircularProgress,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
+  TextField,
+  Typography,
+} from "@mui/material";
 import { MessageCircle, Sparkles, X } from "lucide-react";
-import { clearGlobalChatSession, globalChat } from "../../Service/ai.service";
+import { clearGlobalChatSession, fetchAiModels, globalChat } from "../../Service/ai.service";
 import { getRequest } from "../../Service/api.service";
 import { AiChatContextStrip } from "./AiInsightContent";
 
@@ -55,6 +64,9 @@ const GlobalChatbot = () => {
   const [objectsLoading, setObjectsLoading] = useState(false);
   const [jobRows, setJobRows] = useState([]);
   const [jobsLoading, setJobsLoading] = useState(false);
+  const [aiModels, setAiModels] = useState([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [selectedModelId, setSelectedModelId] = useState("");
 
   useEffect(() => {
     try {
@@ -71,6 +83,7 @@ const GlobalChatbot = () => {
       setAdminModule(saved.adminModule || "dashboards");
       setReportJobName(saved.reportJobName || "");
       setSecuritySubModule(saved.securitySubModule || "users");
+      setSelectedModelId(saved.selectedModelId || "");
       setMessages(Array.isArray(saved.messages) ? saved.messages.slice(-40) : []);
     } catch (e) {
       // ignore invalid cache
@@ -90,6 +103,7 @@ const GlobalChatbot = () => {
           adminModule,
           reportJobName,
           securitySubModule,
+          selectedModelId,
           messages: messages.slice(-40).map((m) => ({
             role: m.role,
             content: m.content,
@@ -108,6 +122,7 @@ const GlobalChatbot = () => {
     adminModule,
     reportJobName,
     securitySubModule,
+    selectedModelId,
     messages,
   ]);
 
@@ -158,6 +173,31 @@ const GlobalChatbot = () => {
     loadJobs();
   }, [open, consoleType, dataModule, loadJobs]);
 
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setModelsLoading(true);
+    fetchAiModels()
+      .then((res) => {
+        const list = Array.isArray(res?.models) ? res.models : [];
+        if (cancelled) return;
+        setAiModels(list);
+        setSelectedModelId((prev) => {
+          if (prev && list.some((m) => m.id === prev)) return prev;
+          return list[0]?.id || "";
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setAiModels([]);
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
   const contextFilters = useMemo(() => {
     const base = {
       selectedObject: resolvedObjectId,
@@ -188,12 +228,13 @@ const GlobalChatbot = () => {
   const moduleKeyForApi = consoleType === "data" ? dataModule : adminModule;
 
   const canStartChat = useMemo(() => {
+    if (modelsLoading) return false;
     if (consoleType === "data") {
       if (dataModule === "register" && !resolvedObjectId) return false;
       if (dataModule === "reports" && reportJobName && !resolvedObjectId) return false;
     }
     return true;
-  }, [consoleType, dataModule, reportJobName, resolvedObjectId]);
+  }, [modelsLoading, consoleType, dataModule, reportJobName, resolvedObjectId]);
 
   const scopeSummary = useMemo(() => {
     const objLabel =
@@ -202,7 +243,12 @@ const GlobalChatbot = () => {
         : objects.find((o) => String(o.objectId) === String(chatObjectId))?.objectName || "Selected object";
     if (consoleType === "admin") {
       const m = ADMIN_MODULES.find((x) => x.id === adminModule);
-      return `${objLabel} · Admin · ${m?.label || adminModule}`;
+      const base = `${objLabel} · Admin · ${m?.label || adminModule}`;
+      const modelLabel =
+        selectedModelId && aiModels.length
+          ? aiModels.find((x) => x.id === selectedModelId)?.label || selectedModelId
+          : null;
+      return modelLabel ? `${base} · ${modelLabel}` : base;
     }
     const m = DATA_MODULES.find((x) => x.id === dataModule);
     let tail = m?.label || dataModule;
@@ -211,7 +257,12 @@ const GlobalChatbot = () => {
       const s = SECURITY_SUBS.find((x) => x.id === securitySubModule);
       tail += ` · ${s?.label || securitySubModule}`;
     }
-    return `${objLabel} · Data · ${tail}`;
+    const modelLabel =
+      selectedModelId && aiModels.length
+        ? aiModels.find((m) => m.id === selectedModelId)?.label || selectedModelId
+        : null;
+    const base = `${objLabel} · Data · ${tail}`;
+    return modelLabel ? `${base} · ${modelLabel}` : base;
   }, [
     chatObjectId,
     objects,
@@ -220,6 +271,8 @@ const GlobalChatbot = () => {
     dataModule,
     reportJobName,
     securitySubModule,
+    selectedModelId,
+    aiModels,
   ]);
 
   /** Compact label for header chip; full sentence in title tooltip */
@@ -234,7 +287,16 @@ const GlobalChatbot = () => {
           })();
     if (consoleType === "admin") {
       const m = ADMIN_MODULES.find((x) => x.id === adminModule);
-      return `${objTag} · Admin · ${m?.label || adminModule}`;
+      const adminBase = `${objTag} · Admin · ${m?.label || adminModule}`;
+      const adminModel =
+        selectedModelId && aiModels.length
+          ? aiModels.find((x) => x.id === selectedModelId)?.label || selectedModelId
+          : null;
+      if (adminModel) {
+        const short = adminModel.length > 14 ? `${adminModel.slice(0, 12)}…` : adminModel;
+        return `${adminBase} · ${short}`;
+      }
+      return adminBase;
     }
     const m = DATA_MODULES.find((x) => x.id === dataModule);
     const parts = [objTag, "Data", m?.label || dataModule];
@@ -246,7 +308,16 @@ const GlobalChatbot = () => {
       const s = SECURITY_SUBS.find((x) => x.id === securitySubModule);
       parts.push(s?.label || securitySubModule);
     }
-    return parts.join(" · ");
+    let chip = parts.join(" · ");
+    const dataModel =
+      selectedModelId && aiModels.length
+        ? aiModels.find((x) => x.id === selectedModelId)?.label || selectedModelId
+        : null;
+    if (dataModel) {
+      const short = dataModel.length > 14 ? `${dataModel.slice(0, 12)}…` : dataModel;
+      chip += ` · ${short}`;
+    }
+    return chip;
   }, [
     chatObjectId,
     objects,
@@ -255,6 +326,8 @@ const GlobalChatbot = () => {
     dataModule,
     reportJobName,
     securitySubModule,
+    selectedModelId,
+    aiModels,
   ]);
 
   const handleStartChat = () => {
@@ -284,6 +357,7 @@ const GlobalChatbot = () => {
         moduleKey: moduleKeyForApi,
         route: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
         contextFilters,
+        modelId: selectedModelId || undefined,
         messages: newMsgs.slice(-16),
       });
       setMessages((prev) => [
@@ -324,8 +398,9 @@ const GlobalChatbot = () => {
       moduleKey: moduleKeyForApi,
       route: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
       contextFilters,
+      modelId: selectedModelId || undefined,
     }),
-    [user?.orgId, user?.id, consoleType, moduleKeyForApi, location.pathname, contextFilters]
+    [user?.orgId, user?.id, consoleType, moduleKeyForApi, location.pathname, contextFilters, selectedModelId]
   );
 
   const handleResetConversation = async () => {
@@ -424,8 +499,8 @@ const GlobalChatbot = () => {
           {!onboardDone ? (
             <div className="p-4 space-y-4 overflow-y-auto flex-1 min-h-0 bg-gradient-to-b from-slate-50/80 to-white">
               <Typography variant="body2" className="text-slate-700 !text-[13px] !leading-relaxed">
-                Choose <strong>object</strong>, <strong>console</strong>, and <strong>area</strong> so answers match where
-                you’re working. Then chat in plain language.
+                Choose <strong>object</strong>, <strong>console</strong>, <strong>area</strong>, and (when available){" "}
+                <strong>model</strong> so answers match where you’re working. Then chat in plain language.
               </Typography>
 
               <div className="space-y-1.5">
@@ -531,6 +606,28 @@ const GlobalChatbot = () => {
                       </MenuItem>
                     ))}
                   </Select>
+                </div>
+              )}
+
+              {aiModels.length > 0 && (
+                <div className="space-y-1.5">
+                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">4 · Model</label>
+                  <FormControl size="small" fullWidth disabled={modelsLoading}>
+                    <InputLabel id="global-chat-model-label">Cloud AI model</InputLabel>
+                    <Select
+                      labelId="global-chat-model-label"
+                      label="Cloud AI model"
+                      value={selectedModelId || aiModels[0]?.id || ""}
+                      onChange={(e) => setSelectedModelId(e.target.value)}
+                    >
+                      {aiModels.map((m) => (
+                        <MenuItem key={m.id} value={m.id}>
+                          {m.label || m.id}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  {modelsLoading && <div className="text-[10px] text-gray-500">Refreshing models…</div>}
                 </div>
               )}
 
