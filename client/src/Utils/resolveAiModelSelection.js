@@ -3,9 +3,11 @@
  * vs "openai1::gpt-4o-mini" so Azure and OpenAI are distinct when the technical name matches.
  * Migrates legacy stored ids that were only the bare name (e.g. "gpt-4o-mini").
  */
-export function resolveAiModelSelection(previousId, models) {
+export function resolveAiModelSelection(previousId, models, preferredId = "") {
   const list = Array.isArray(models) ? models : [];
   if (!list.length) return "";
+  const preferred = typeof preferredId === "string" ? preferredId.trim() : "";
+  if (preferred && list.some((m) => m && m.id === preferred)) return preferred;
   const prev = typeof previousId === "string" ? previousId.trim() : "";
   if (prev && list.some((m) => m && m.id === prev)) return prev;
 

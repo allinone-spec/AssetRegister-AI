@@ -1053,7 +1053,7 @@ const DataTable = ({
         .then((res) => {
           const list = res?.models || [];
           setAiModels(list);
-          setSelectedModelId((prev) => resolveAiModelSelection(prev, list));
+          setSelectedModelId((prev) => resolveAiModelSelection(prev, list, res?.defaultChatModelId || ""));
         })
         .catch(() => setAiModels([]));
     }

@@ -226,7 +226,7 @@ const GlobalChatbot = () => {
         const list = Array.isArray(res?.models) ? res.models : [];
         if (cancelled) return;
         setAiModels(list);
-        setSelectedModelId((prev) => resolveAiModelSelection(prev, list));
+        setSelectedModelId((prev) => resolveAiModelSelection(prev, list, res?.defaultChatModelId || ""));
       })
       .catch(() => {
         if (!cancelled) setAiModels([]);

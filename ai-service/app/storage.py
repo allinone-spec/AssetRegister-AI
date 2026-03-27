@@ -71,6 +71,12 @@ class AIStateStore:
                     body TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    setting_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             cols = [r[1] for r in conn.execute("PRAGMA table_info(dataset_snapshots)").fetchall()]
@@ -427,3 +433,34 @@ class AIStateStore:
         with self._connect() as conn:
             rows = conn.execute("SELECT prompt_key FROM app_prompts ORDER BY prompt_key").fetchall()
         return [str(r["prompt_key"]) for r in rows]
+
+    def get_app_setting(self, setting_key: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT setting_value FROM app_settings WHERE setting_key = ?",
+                (setting_key,),
+            ).fetchone()
+        return str(row["setting_value"]) if row and row["setting_value"] is not None else None
+
+    def set_app_setting(self, setting_key: str, setting_value: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_settings (setting_key, setting_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value,
+                    updated_at = excluded.updated_at
+                """,
+                (setting_key, setting_value, now),
+            )
+
+    def delete_app_setting(self, setting_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM app_settings WHERE setting_key = ?", (setting_key,))
+
+    def list_app_settings(self) -> Dict[str, str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT setting_key, setting_value FROM app_settings").fetchall()
+        return {str(r["setting_key"]): str(r["setting_value"]) for r in rows}

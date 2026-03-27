@@ -57,6 +57,7 @@ import { Register } from "../Components/core/DataConsole/Register/Register";
 import ImportStatus from "../Components/core/AdminConsole/ImportStatus/ImportStatus";
 import ObjectConfig from "../Components/core/DataConsole/Settings/ObjectConfiguration";
 import AiPromptSettings from "../Components/core/AdminConsole/Settings/AiPromptSettings";
+import AiModelSettings from "../Components/core/AdminConsole/Settings/AiModelSettings";
 import ApplicationMenu from "../Components/core/AdminConsole/Jobs/MenuPage";
 import { Suspense, useEffect, useState } from "react";
 import { adminBaseUrl, axiosDefaultHeader } from "../Utility/baseUrl";
@@ -1346,6 +1347,22 @@ const AppRoute = () => {
                   element={
                     <ProtectedRoute
                       element={<AiPromptSettings routeName="Settings" />}
+                      type={
+                        permissionDetails?.Settings?.permissionTypes.find(
+                          (v) => v === "ReadOnly" || v === "WriteOnly",
+                        )
+                          ? permissionDetails?.Settings?.permissionTypes[0]
+                          : false
+                      }
+                      routeName="Settings"
+                    />
+                  }
+                />
+                <Route
+                  path="settings/ai-model"
+                  element={
+                    <ProtectedRoute
+                      element={<AiModelSettings routeName="Settings" />}
                       type={
                         permissionDetails?.Settings?.permissionTypes.find(
                           (v) => v === "ReadOnly" || v === "WriteOnly",

@@ -90,6 +90,10 @@ const adminConsoleSidebarData = [
         title: "AI prompt templates",
         path: "/admin-console/settings/ai-prompts",
       },
+      {
+        title: "AI Model",
+        path: "/admin-console/settings/ai-model",
+      },
 
       // { title: "Theme", path: "/admin-console/security/theme-selector" },
     ],

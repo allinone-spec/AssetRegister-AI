@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 import hashlib
 import json
-import os
 import re
 import threading
 import time
@@ -40,7 +39,8 @@ OPENAI_REQUESTS_PER_MINUTE = 3
 OPENAI_MIN_INTERVAL_SEC = 20.0
 OPENAI_429_BACKOFF_BUDGET_SEC = 90
 OPENAI_MAX_ATTEMPTS = 5
-OPENAI_MAX_OUTPUT_TOKENS = 400
+OPENAI_MAX_OUTPUT_TOKENS_NON_JSON = 600
+OPENAI_MAX_OUTPUT_TOKENS_JSON = 2200
 _ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
@@ -59,13 +59,17 @@ class Settings(BaseSettings):
     azure_openai_2_endpoint: Optional[str] = None
     azure_openai_2_deployment: Optional[str] = None
     azure_openai_2_api_version: Optional[str] = None
+    azure_openai_deployments: Optional[str] = None
     # OpenAI cloud API (same capabilities as Azure path via _llm_chat): OPENAI_API_KEY, OPENAI_MODEL
     # Optional second model id with same key: OPENAI_MODEL_2
     # Optional API base (default https://api.openai.com/v1): OPENAI_BASE_URL
     openai_api_key: Optional[str] = None
     openai_model: Optional[str] = None
     openai_model_2: Optional[str] = None
+    openai_models: Optional[str] = None
     openai_base_url: Optional[str] = None
+    ai_default_analysis_model_id: Optional[str] = None
+    ai_default_chat_model_id: Optional[str] = None
     # Comma-separated CORS origins for production (e.g. https://app.example.com)
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
@@ -89,7 +93,6 @@ def _read_env_file_value(key: str) -> Optional[str]:
     return None
 
 
-@lru_cache()
 def get_settings() -> Settings:
     settings = Settings()
     # Force OpenAI config to follow ai-service/.env exactly, matching test_openai.py behavior.
@@ -105,6 +108,27 @@ def get_settings() -> Settings:
     file_openai_base_url = _read_env_file_value("OPENAI_BASE_URL")
     if file_openai_base_url:
         settings.openai_base_url = file_openai_base_url
+    try:
+        runtime_store = AIStateStore(settings.ai_state_db)
+        overrides = runtime_store.list_app_settings()
+
+        def _apply_override(store_key: str, attr: str) -> None:
+            if store_key not in overrides:
+                return
+            raw = str(overrides.get(store_key) or "").strip()
+            setattr(settings, attr, raw or None)
+
+        _apply_override("AZURE_OPENAI_API_KEY", "azure_openai_api_key")
+        _apply_override("AZURE_OPENAI_ENDPOINT", "azure_openai_endpoint")
+        _apply_override("AZURE_OPENAI_API_VERSION", "azure_openai_api_version")
+        _apply_override("AZURE_OPENAI_DEPLOYMENTS", "azure_openai_deployments")
+        _apply_override("OPENAI_API_KEY", "openai_api_key")
+        _apply_override("OPENAI_BASE_URL", "openai_base_url")
+        _apply_override("OPENAI_MODELS", "openai_models")
+        _apply_override("AI_DEFAULT_ANALYSIS_MODEL_ID", "ai_default_analysis_model_id")
+        _apply_override("AI_DEFAULT_CHAT_MODEL_ID", "ai_default_chat_model_id")
+    except Exception:
+        pass
     return settings
 
 
@@ -209,6 +233,33 @@ class PromptConfigUpdateRequest(BaseModel):
     prompts: Dict[str, Optional[str]] = Field(default_factory=dict)
 
 
+class AIAdminSettingsResponse(BaseModel):
+    azureOpenAiApiKey: str = ""
+    openAiApiKey: str = ""
+    azureOpenAiApiKeyMasked: str = ""
+    openAiApiKeyMasked: str = ""
+    azureOpenAiEndpoint: str = ""
+    azureOpenAiApiVersion: str = ""
+    openAiBaseUrl: str = ""
+    azureDeployments: List[str] = Field(default_factory=list)
+    openAiModels: List[str] = Field(default_factory=list)
+    defaultAnalysisModelId: Optional[str] = None
+    defaultChatModelId: Optional[str] = None
+    models: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class AIAdminSettingsUpdateRequest(BaseModel):
+    azureOpenAiApiKey: Optional[str] = None
+    openAiApiKey: Optional[str] = None
+    azureOpenAiEndpoint: Optional[str] = None
+    azureOpenAiApiVersion: Optional[str] = None
+    openAiBaseUrl: Optional[str] = None
+    azureDeployments: Optional[List[str]] = None
+    openAiModels: Optional[List[str]] = None
+    defaultAnalysisModelId: Optional[str] = None
+    defaultChatModelId: Optional[str] = None
+
+
 app = FastAPI(title="AssetRegister AI Sidecar", version="1.0.0")
 
 _MAX_APP_PROMPT_CHARS = 60000
@@ -274,15 +325,84 @@ def _parse_ai_model_id(model_id: str) -> tuple[Optional[str], str]:
     return None, model_id.strip()
 
 
+def _split_csv_values(raw: Optional[str]) -> List[str]:
+    if raw is None:
+        return []
+    out: List[str] = []
+    for chunk in str(raw).replace("\n", ",").split(","):
+        item = chunk.strip()
+        if item:
+            out.append(item)
+    return out
+
+
+def _unique_keep_order(items: List[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _configured_azure_deployments(settings: Settings) -> List[str]:
+    values: List[str] = []
+    values.extend(_split_csv_values(getattr(settings, "azure_openai_deployment", None)))
+    values.extend(_split_csv_values(getattr(settings, "azure_openai_2_deployment", None)))
+    values.extend(_split_csv_values(getattr(settings, "azure_openai_deployments", None)))
+    return _unique_keep_order(values)
+
+
+def _configured_openai_models(settings: Settings) -> List[str]:
+    values: List[str] = []
+    values.extend(_split_csv_values(getattr(settings, "openai_model", None)))
+    values.extend(_split_csv_values(getattr(settings, "openai_model_2", None)))
+    values.extend(_split_csv_values(getattr(settings, "openai_models", None)))
+    return _unique_keep_order(values)
+
+
+def _mask_secret(secret: Optional[str]) -> str:
+    s = str(secret or "").strip()
+    if not s:
+        return ""
+    if len(s) <= 8:
+        return "*" * len(s)
+    return f"{s[:4]}...{s[-4:]}"
+
+
+def _resolved_openai_base_url(settings: Settings) -> str:
+    return str(getattr(settings, "openai_base_url", None) or "https://api.openai.com/v1").strip()
+
+
 def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
-    """Build list of configured AI models from .env (Azure 1, optional Azure 2, optional OpenAI)."""
+    """Build list of configured AI models from env + admin settings."""
     models: List[Dict[str, Any]] = []
+    azure_deployments = _configured_azure_deployments(settings)
+    openai_models = _configured_openai_models(settings)
+    if settings.azure_openai_api_key and azure_deployments:
+        for dep in azure_deployments:
+            models.append({
+                "id": _format_ai_model_id("azure", dep),
+                "provider": "azure_openai",
+                "label": f"Azure OpenAI - {dep}",
+            })
+    if settings.openai_api_key and openai_models:
+        for model in openai_models:
+            models.append({
+                "id": _format_ai_model_id("openai", model),
+                "provider": "openai",
+                "label": f"OpenAI - {model}",
+            })
+
+    # Backward-compatibility ids for old clients/saved local selections.
     if settings.azure_openai_api_key and settings.azure_openai_deployment:
-        dep = settings.azure_openai_deployment
+        dep = str(settings.azure_openai_deployment).strip()
         models.append({
             "id": _format_ai_model_id(_AI_SLOT_AZURE_PRIMARY, dep),
             "provider": "azure_openai",
-            "label": f"Azure OpenAI – {dep}",
+            "label": f"Azure OpenAI (legacy) - {dep}",
         })
     if (
         getattr(settings, "azure_openai_2_api_key", None)
@@ -293,14 +413,14 @@ def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
         models.append({
             "id": _format_ai_model_id(_AI_SLOT_AZURE_SECONDARY, dep),
             "provider": "azure_openai",
-            "label": f"Azure OpenAI (2) – {dep}",
+            "label": f"Azure OpenAI (2 legacy) - {dep}",
         })
     if getattr(settings, "openai_api_key", None) and getattr(settings, "openai_model", None):
         model = settings.openai_model
         models.append({
             "id": _format_ai_model_id(_AI_SLOT_OPENAI_PRIMARY, model),
             "provider": "openai",
-            "label": f"OpenAI – {model}",
+            "label": f"OpenAI (legacy) - {model}",
         })
     if (
         getattr(settings, "openai_api_key", None)
@@ -311,12 +431,21 @@ def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
         models.append({
             "id": _format_ai_model_id(_AI_SLOT_OPENAI_SECONDARY, m2),
             "provider": "openai",
-            "label": f"OpenAI (2) – {m2}",
+            "label": f"OpenAI (2 legacy) - {m2}",
         })
-    return models
+    # Remove duplicates by id while preserving first occurrence.
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for m in models:
+        mid = str(m.get("id") or "")
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        deduped.append(m)
+    return deduped
 
 
-def _default_model_id(settings: Settings) -> str:
+def _default_model_id(settings: Settings, purpose: str = "analysis") -> str:
     """
     Choose default model id when request payload does not include modelId.
     Prefer OpenAI when configured, then fall back to first configured model.
@@ -324,6 +453,11 @@ def _default_model_id(settings: Settings) -> str:
     models = _get_ai_models_list(settings)
     if not models:
         raise HTTPException(status_code=503, detail="No AI model is configured in .env.")
+    preferred = (
+        (settings.ai_default_chat_model_id if purpose == "chat" else settings.ai_default_analysis_model_id) or ""
+    ).strip()
+    if preferred and any(str(m.get("id") or "") == preferred for m in models):
+        return preferred
     for item in models:
         if str(item.get("provider") or "").strip().lower() == "openai":
             return str(item["id"])
@@ -333,13 +467,32 @@ def _default_model_id(settings: Settings) -> str:
 def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
     """Resolve model_id to config dict (provider, endpoint, deployment, api_key, etc.)."""
     if not (model_id or "").strip():
-        model_id = _default_model_id(settings)
+        model_id = _default_model_id(settings, purpose="analysis")
     else:
         model_id = model_id.strip()
 
     slot, technical = _parse_ai_model_id(model_id)
 
-    if slot == _AI_SLOT_AZURE_PRIMARY:
+    azure_deployments = _configured_azure_deployments(settings)
+    openai_models = _configured_openai_models(settings)
+
+    if slot == "azure":
+        if settings.azure_openai_api_key and technical in azure_deployments:
+            return {
+                "provider": "azure_openai",
+                "endpoint": (settings.azure_openai_endpoint or "").rstrip("/"),
+                "deployment": technical,
+                "api_version": settings.azure_openai_api_version,
+                "api_key": settings.azure_openai_api_key,
+            }
+    elif slot == "openai":
+        if settings.openai_api_key and technical in openai_models:
+            return {
+                "provider": "openai",
+                "api_key": settings.openai_api_key,
+                "model": technical,
+            }
+    elif slot == _AI_SLOT_AZURE_PRIMARY:
         if settings.azure_openai_api_key and technical == settings.azure_openai_deployment:
             return {
                 "provider": "azure_openai",
@@ -399,17 +552,11 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
                 "api_version": getattr(settings, "azure_openai_2_api_version") or "2024-02-15-preview",
                 "api_key": settings.azure_openai_2_api_key,
             }
-        if getattr(settings, "openai_model", None) and technical == settings.openai_model and settings.openai_api_key:
+        if settings.openai_api_key and technical in openai_models:
             return {
                 "provider": "openai",
                 "api_key": settings.openai_api_key,
-                "model": settings.openai_model,
-            }
-        if getattr(settings, "openai_model_2", None) and technical == settings.openai_model_2 and settings.openai_api_key:
-            return {
-                "provider": "openai",
-                "api_key": settings.openai_api_key,
-                "model": settings.openai_model_2,
+                "model": technical,
             }
 
     raise HTTPException(
@@ -804,10 +951,10 @@ def _session_dataset_key(payload: AnalyzeRequest | ChatRequest | ChatSessionRequ
     return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _model_id_or_default(payload_model: Optional[str], settings: Settings) -> str:
+def _model_id_or_default(payload_model: Optional[str], settings: Settings, purpose: str = "analysis") -> str:
     model_id = (payload_model or "").strip()
     if not model_id:
-        return _default_model_id(settings)
+        return _default_model_id(settings, purpose=purpose)
     _get_model_config(settings, model_id)
     return model_id
 
@@ -2367,11 +2514,6 @@ def _extract_json_block(content: str) -> Dict[str, Any]:
         raise
 
 
-def _openai_chat_completions_url(settings: Settings) -> str:
-    base = (getattr(settings, "openai_base_url", None) or "https://api.openai.com/v1").rstrip("/")
-    return f"{base}/chat/completions"
-
-
 @lru_cache()
 def _get_openai_sdk_client(api_key: str, base_url: str) -> OpenAI:
     kwargs: Dict[str, Any] = {"api_key": api_key, "max_retries": 0}
@@ -2439,7 +2581,7 @@ def _openai_assistant_text_from_completion(res: Any) -> str:
     return _openai_assistant_text_from_message(getattr(res.choices[0], "message", None))
 
 
-def _llm_chat_payload_for_openai(model: str, base_payload: Dict[str, Any]) -> Dict[str, Any]:
+def _llm_chat_payload_for_openai(model: str, base_payload: Dict[str, Any], json_mode: bool = False) -> Dict[str, Any]:
     """Newer OpenAI models use max_completion_tokens and reject temperature (see test.py / gpt-5-mini)."""
     out = dict(base_payload)
     m = (model or "").lower()
@@ -2448,17 +2590,18 @@ def _llm_chat_payload_for_openai(model: str, base_payload: Dict[str, Any]) -> Di
         mt = out.pop("max_tokens", None)
         if mt is not None:
             out["max_completion_tokens"] = mt
-    # Keep OpenAI spend bounded for larger /analyze prompts.
+    # Keep OpenAI spend bounded while allowing larger JSON payloads to avoid truncated JSON.
+    cap = OPENAI_MAX_OUTPUT_TOKENS_JSON if json_mode else OPENAI_MAX_OUTPUT_TOKENS_NON_JSON
     if "max_completion_tokens" in out:
         try:
-            out["max_completion_tokens"] = max(64, min(int(out["max_completion_tokens"]), OPENAI_MAX_OUTPUT_TOKENS))
+            out["max_completion_tokens"] = max(64, min(int(out["max_completion_tokens"]), cap))
         except Exception:
-            out["max_completion_tokens"] = OPENAI_MAX_OUTPUT_TOKENS
+            out["max_completion_tokens"] = cap
     elif "max_tokens" in out:
         try:
-            out["max_tokens"] = max(64, min(int(out["max_tokens"]), OPENAI_MAX_OUTPUT_TOKENS))
+            out["max_tokens"] = max(64, min(int(out["max_tokens"]), cap))
         except Exception:
-            out["max_tokens"] = OPENAI_MAX_OUTPUT_TOKENS
+            out["max_tokens"] = cap
     return out
 
 
@@ -2490,9 +2633,9 @@ def _llm_chat(
             raise HTTPException(status_code=503, detail="OpenAI API key is not configured.")
         model = cfg.get("model") or "gpt-4o-mini"
         provider_label = "OpenAI"
-        req_payload = _llm_chat_payload_for_openai(model, payload)
+        req_payload = _llm_chat_payload_for_openai(model, payload, json_mode=json_mode)
         req_payload["model"] = model
-        openai_client = _get_openai_sdk_client(api_key, getattr(settings, "openai_base_url", None) or "")
+        openai_client = _get_openai_sdk_client(api_key, _resolved_openai_base_url(settings))
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
@@ -2574,6 +2717,14 @@ def _llm_chat(
                     raise HTTPException(
                         status_code=429,
                         detail=f"{provider_label} is temporarily rate-limited. Wait about {retry_after} seconds.",
+                    )
+                if resp.status_code == 404 and "DeploymentNotFound" in (resp.text or ""):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Azure OpenAI deployment was not found for the selected model. "
+                            "Create that deployment in Azure OpenAI or select an existing deployment."
+                        ),
                     )
                 raise HTTPException(
                     status_code=502,
@@ -5016,7 +5167,7 @@ def _ensure_daily_analysis(
     payload: AnalyzeRequest,
     request: Request,
 ) -> Dict[str, Any]:
-    model_id = _model_id_or_default(payload.modelId, settings)
+    model_id = _model_id_or_default(payload.modelId, settings, purpose="analysis")
     day_key = utc_day_key()
     analysis_dataset_key = _dataset_key(payload, resolved_model_id=model_id)
     session_key = _session_dataset_key(payload)
@@ -5241,8 +5392,18 @@ def _ensure_daily_analysis(
 def list_models(settings: Settings = Depends(get_settings)) -> Dict[str, Any]:
     models = _get_ai_models_list(settings)
     if not models:
-        return {"provider": "none", "models": []}
-    return {"provider": models[0].get("provider", "azure_openai"), "models": models}
+        return {
+            "provider": "none",
+            "models": [],
+            "defaultAnalysisModelId": None,
+            "defaultChatModelId": None,
+        }
+    return {
+        "provider": models[0].get("provider", "azure_openai"),
+        "models": models,
+        "defaultAnalysisModelId": _default_model_id(settings, purpose="analysis"),
+        "defaultChatModelId": _default_model_id(settings, purpose="chat"),
+    }
 
 
 @app.post("/api/ai/analyze")
@@ -5254,7 +5415,7 @@ def analyze(payload: AnalyzeRequest, request: Request, settings: Settings = Depe
 @app.post("/api/ai/chat")
 def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(get_settings)):
     store = get_store()
-    model_id = _model_id_or_default(payload.modelId, settings)
+    model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
     day_key = utc_day_key()
     session_key = _session_dataset_key(payload)
     persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
@@ -5311,7 +5472,7 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
 @app.post("/api/ai/global-chat")
 def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings = Depends(get_settings)):
     store = get_store()
-    model_id = _model_id_or_default(payload.modelId, settings)
+    model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
     day_key = utc_day_key()
     persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
     persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
@@ -5409,7 +5570,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
 def clear_global_chat_session(payload: GlobalChatSessionRequest, settings: Settings = Depends(get_settings)):
     store = get_store()
     day_key = utc_day_key()
-    model_id = _model_id_or_default(payload.modelId, settings)
+    model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
     session_page_id, session_key = _global_chat_pseudo_analyze(
         payload.orgId,
         payload.userId,
@@ -5421,6 +5582,73 @@ def clear_global_chat_session(payload: GlobalChatSessionRequest, settings: Setti
     )
     store.clear_chat_messages(day_key, payload.orgId, payload.userId, session_page_id, session_key)
     return {"ok": True, "message": "Global chat session cleared for this scope."}
+
+
+def _get_ai_admin_settings_payload(settings: Settings) -> AIAdminSettingsResponse:
+    models = _get_ai_models_list(settings)
+    return AIAdminSettingsResponse(
+        azureOpenAiApiKey=str(settings.azure_openai_api_key or "").strip(),
+        openAiApiKey=str(settings.openai_api_key or "").strip(),
+        azureOpenAiApiKeyMasked=_mask_secret(settings.azure_openai_api_key),
+        openAiApiKeyMasked=_mask_secret(settings.openai_api_key),
+        azureOpenAiEndpoint=str(settings.azure_openai_endpoint or "").strip(),
+        azureOpenAiApiVersion=str(settings.azure_openai_api_version or "").strip(),
+        openAiBaseUrl=_resolved_openai_base_url(settings),
+        azureDeployments=_configured_azure_deployments(settings),
+        openAiModels=_configured_openai_models(settings),
+        defaultAnalysisModelId=_default_model_id(settings, purpose="analysis") if models else None,
+        defaultChatModelId=_default_model_id(settings, purpose="chat") if models else None,
+        models=models,
+    )
+
+
+@app.get("/api/ai/admin/settings", response_model=AIAdminSettingsResponse)
+def get_ai_admin_settings(settings: Settings = Depends(get_settings)):
+    return _get_ai_admin_settings_payload(settings)
+
+
+@app.put("/api/ai/admin/settings")
+def put_ai_admin_settings(payload: AIAdminSettingsUpdateRequest, settings: Settings = Depends(get_settings)):
+    store = get_store()
+
+    def _upsert_or_delete(key: str, value: Optional[str]) -> None:
+        if value is None:
+            return
+        v = str(value).strip()
+        if v:
+            store.set_app_setting(key, v)
+        else:
+            store.delete_app_setting(key)
+
+    _upsert_or_delete("AZURE_OPENAI_API_KEY", payload.azureOpenAiApiKey)
+    _upsert_or_delete("OPENAI_API_KEY", payload.openAiApiKey)
+    _upsert_or_delete("AZURE_OPENAI_ENDPOINT", payload.azureOpenAiEndpoint)
+    _upsert_or_delete("AZURE_OPENAI_API_VERSION", payload.azureOpenAiApiVersion)
+    _upsert_or_delete("OPENAI_BASE_URL", payload.openAiBaseUrl)
+
+    if payload.azureDeployments is not None:
+        joined = ",".join([str(x).strip() for x in payload.azureDeployments if str(x).strip()])
+        _upsert_or_delete("AZURE_OPENAI_DEPLOYMENTS", joined)
+    if payload.openAiModels is not None:
+        joined = ",".join([str(x).strip() for x in payload.openAiModels if str(x).strip()])
+        _upsert_or_delete("OPENAI_MODELS", joined)
+
+    # Validate selected defaults against current configured model list.
+    next_settings = get_settings()
+    available_ids = {str(m.get("id") or "") for m in _get_ai_models_list(next_settings)}
+
+    if payload.defaultAnalysisModelId is not None:
+        chosen = str(payload.defaultAnalysisModelId or "").strip()
+        if chosen and chosen not in available_ids:
+            raise HTTPException(status_code=400, detail="defaultAnalysisModelId is not in configured model list.")
+        _upsert_or_delete("AI_DEFAULT_ANALYSIS_MODEL_ID", chosen)
+    if payload.defaultChatModelId is not None:
+        chosen = str(payload.defaultChatModelId or "").strip()
+        if chosen and chosen not in available_ids:
+            raise HTTPException(status_code=400, detail="defaultChatModelId is not in configured model list.")
+        _upsert_or_delete("AI_DEFAULT_CHAT_MODEL_ID", chosen)
+
+    return {"ok": True, "settings": _get_ai_admin_settings_payload(get_settings()).model_dump()}
 
 
 @app.get("/api/ai/prompt-config", response_model=PromptConfigResponse)
@@ -5484,7 +5712,7 @@ def clear_chat_session(payload: ChatSessionRequest, settings: Settings = Depends
     store = get_store()
     day_key = utc_day_key()
     session_key = _session_dataset_key(payload)
-    model_id = _model_id_or_default(payload.modelId, settings)
+    model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
     analysis_dataset_key = _dataset_key(payload, resolved_model_id=model_id)
     snapshot_key = _dataset_key(payload, resolved_model_id=None)
     store.clear_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
@@ -5532,7 +5760,7 @@ def ai_feedback(payload: FeedbackRequest, settings: Settings = Depends(get_setti
         pageId=payload.pageId,
         category=payload.category or "feedback",
         filters=payload.filters or {},
-        modelId=_model_id_or_default(None, settings),
+        modelId=_model_id_or_default(None, settings, purpose="analysis"),
     )
     session_key = _session_dataset_key(pseudo)
     store.add_feedback(
@@ -5552,7 +5780,7 @@ def invalidate_analysis_cache(payload: AnalyzeRequest, settings: Settings = Depe
     _ensure_supported_page_id(payload.pageId)
     store = get_store()
     day_key = utc_day_key()
-    model_id = _model_id_or_default(payload.modelId, settings)
+    model_id = _model_id_or_default(payload.modelId, settings, purpose="analysis")
     dataset_key = _dataset_key(payload, resolved_model_id=model_id)
     store.clear_cached_analysis(day_key, dataset_key)
     return {"ok": True, "message": "Analysis cache invalidated. Next analyze will re-run."}

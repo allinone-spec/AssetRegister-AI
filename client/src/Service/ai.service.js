@@ -66,6 +66,18 @@ export const savePromptConfig = async (payload) => {
   return response.data;
 };
 
+/** Admin: read AI model + key settings. */
+export const fetchAiAdminSettings = async () => {
+  const response = await aiApi.get("/admin/settings");
+  return response.data;
+};
+
+/** Admin: save AI model + key settings. */
+export const saveAiAdminSettings = async (payload) => {
+  const response = await aiApi.put("/admin/settings", payload);
+  return response.data;
+};
+
 /**
  * Clear same-day backend chat session for the current user/page.
  */
