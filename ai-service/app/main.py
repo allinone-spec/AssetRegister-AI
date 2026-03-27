@@ -395,44 +395,6 @@ def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
                 "provider": "openai",
                 "label": f"OpenAI - {model}",
             })
-
-    # Backward-compatibility ids for old clients/saved local selections.
-    if settings.azure_openai_api_key and settings.azure_openai_deployment:
-        dep = str(settings.azure_openai_deployment).strip()
-        models.append({
-            "id": _format_ai_model_id(_AI_SLOT_AZURE_PRIMARY, dep),
-            "provider": "azure_openai",
-            "label": f"Azure OpenAI (legacy) - {dep}",
-        })
-    if (
-        getattr(settings, "azure_openai_2_api_key", None)
-        and getattr(settings, "azure_openai_2_deployment", None)
-        and getattr(settings, "azure_openai_2_endpoint", None)
-    ):
-        dep = settings.azure_openai_2_deployment
-        models.append({
-            "id": _format_ai_model_id(_AI_SLOT_AZURE_SECONDARY, dep),
-            "provider": "azure_openai",
-            "label": f"Azure OpenAI (2 legacy) - {dep}",
-        })
-    if getattr(settings, "openai_api_key", None) and getattr(settings, "openai_model", None):
-        model = settings.openai_model
-        models.append({
-            "id": _format_ai_model_id(_AI_SLOT_OPENAI_PRIMARY, model),
-            "provider": "openai",
-            "label": f"OpenAI (legacy) - {model}",
-        })
-    if (
-        getattr(settings, "openai_api_key", None)
-        and getattr(settings, "openai_model_2", None)
-        and settings.openai_model_2 != getattr(settings, "openai_model", None)
-    ):
-        m2 = settings.openai_model_2
-        models.append({
-            "id": _format_ai_model_id(_AI_SLOT_OPENAI_SECONDARY, m2),
-            "provider": "openai",
-            "label": f"OpenAI (2 legacy) - {m2}",
-        })
     # Remove duplicates by id while preserving first occurrence.
     deduped: List[Dict[str, Any]] = []
     seen = set()
@@ -492,44 +454,23 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
                 "api_key": settings.openai_api_key,
                 "model": technical,
             }
-    elif slot == _AI_SLOT_AZURE_PRIMARY:
-        if settings.azure_openai_api_key and technical == settings.azure_openai_deployment:
+    elif slot in (_AI_SLOT_AZURE_PRIMARY, _AI_SLOT_AZURE_SECONDARY):
+        # Backward compatibility for legacy ids: azure1::deployment / azure2::deployment
+        if settings.azure_openai_api_key and technical in azure_deployments:
             return {
                 "provider": "azure_openai",
                 "endpoint": settings.azure_openai_endpoint.rstrip("/"),
-                "deployment": settings.azure_openai_deployment,
+                "deployment": technical,
                 "api_version": settings.azure_openai_api_version,
                 "api_key": settings.azure_openai_api_key,
             }
-    elif slot == _AI_SLOT_AZURE_SECONDARY:
-        dep2 = getattr(settings, "azure_openai_2_deployment", None)
-        if (
-            dep2
-            and technical == dep2
-            and getattr(settings, "azure_openai_2_api_key", None)
-        ):
-            endpoint = (getattr(settings, "azure_openai_2_endpoint") or settings.azure_openai_endpoint or "").rstrip("/")
-            return {
-                "provider": "azure_openai",
-                "endpoint": endpoint,
-                "deployment": dep2,
-                "api_version": getattr(settings, "azure_openai_2_api_version") or "2024-02-15-preview",
-                "api_key": settings.azure_openai_2_api_key,
-            }
-    elif slot == _AI_SLOT_OPENAI_PRIMARY:
-        if getattr(settings, "openai_model", None) and settings.openai_api_key:
+    elif slot in (_AI_SLOT_OPENAI_PRIMARY, _AI_SLOT_OPENAI_SECONDARY):
+        # Backward compatibility for legacy ids: openai1::model / openai2::model
+        if settings.openai_api_key and technical in openai_models:
             return {
                 "provider": "openai",
                 "api_key": settings.openai_api_key,
-                "model": settings.openai_model,
-            }
-    elif slot == _AI_SLOT_OPENAI_SECONDARY:
-        m2 = getattr(settings, "openai_model_2", None)
-        if m2 and settings.openai_api_key:
-            return {
-                "provider": "openai",
-                "api_key": settings.openai_api_key,
-                "model": settings.openai_model_2,
+                "model": technical,
             }
 
     # Legacy: bare deployment / model name (older clients or manual API calls).
