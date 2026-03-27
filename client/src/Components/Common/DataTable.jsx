@@ -82,6 +82,11 @@ import {
   removeFilterByColumn,
   setFilters,
 } from "../../redux/Slices/AdvancedFilterSlice";
+import {
+  setSelectedObject,
+  setSelectedObjectName,
+  clearSelectedObject,
+} from "../../redux/Slices/ObjectSelection";
 import { SaveFilterModal } from "../Common/SaveFilterModal";
 import { getCommonRegisterRequest } from "../../Service/Console.service";
 import {
@@ -118,6 +123,18 @@ import toast from "react-hot-toast";
 const buildChatMessageId = () => `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const aiInsightChatStateKey = (userId, pageId, category) =>
   `ai-insight-chat-v1:${String(userId || "anonymous")}:${String(pageId || "")}:${String(category || "")}`;
+
+/** Admin list pages: AI filters use object picker; "All object" (empty selection) → objectId null. */
+const ADMIN_AI_OBJECT_SCOPE_PATHS = new Set([
+  "/admin-console/import-status",
+  "/admin-console/saved-jobs",
+  "/admin-console/ar-mapping",
+  "/admin-console/ar-rules",
+  "/admin-console/overview/import-status",
+  "/admin-console/overview/saved-jobs",
+  "/admin-console/overview/ar-mapping",
+  "/admin-console/overview/ar-rules",
+]);
 
 // Column Options Dropdown Component
 const ColumnOptionsDropdown = ({
@@ -929,6 +946,7 @@ const DataTable = ({
   );
   const { folderData } = useSelector((state) => state.folderData);
   const user = useSelector((state) => state.auth?.user);
+  const selectedObject = useSelector((state) => state.selectedObject.value);
 
   const navigate = useNavigate();
   const { pathname } = useLocation();
@@ -978,11 +996,26 @@ const DataTable = ({
   const { layoutTextColor, backgroundColor } = bgColor;
   const isGrouped = !saveFilters?.grouping?.length;
   const isAiSupportedPage =
+    pathname === "/data-console/overview" ||
     pathname === "/data-console/reports/original-source" ||
     pathname.startsWith("/data-console/reports/original-source/jobs/") ||
     pathname === "/data-console/reports/by-ar-resource" ||
     pathname.startsWith("/data-console/reports/by-ar-resource/jobs/") ||
-    pathname === "/data-console/register/detailed";
+    pathname === "/data-console/register/detailed" ||
+    pathname === "/data-console/security/users" ||
+    pathname === "/data-console/security/groups" ||
+    pathname === "/data-console/security/roles" ||
+    pathname === "/data-console/security/permission" ||
+    pathname === "/data-console/security/permissions" ||
+    pathname === "/admin-console/overview" ||
+    pathname === "/admin-console/import-status" ||
+    pathname === "/admin-console/saved-jobs" ||
+    pathname === "/admin-console/ar-mapping" ||
+    pathname === "/admin-console/ar-rules" ||
+    pathname === "/admin-console/overview/import-status" ||
+    pathname === "/admin-console/overview/saved-jobs" ||
+    pathname === "/admin-console/overview/ar-mapping" ||
+    pathname === "/admin-console/overview/ar-rules";
 
   /** Align with AiInsightContent DRILL_GRID_CAP so job/register drill can load full grids beyond one UI page. */
   const AI_INSIGHT_DRILL_MAX = 50000;
@@ -1015,7 +1048,8 @@ const DataTable = ({
   const showAnalyzeButton =
     isAiSupportedPage &&
     pathname !== "/data-console/reports/original-source" &&
-    pathname !== "/data-console/reports/by-ar-resource";
+    pathname !== "/data-console/reports/by-ar-resource" &&
+    pathname !== "/data-console/reports/by-ar-resources";
   // DnD Sensors
   const sensors = useSensors(
     // useSensor(PointerSensor),
@@ -2087,17 +2121,33 @@ const DataTable = ({
     }
   };
 
-  const buildAiFilters = () => ({
-    tableId,
-    viewId,
-    jobName: jobName || null,
-    /** Register /detailed + AI service: mirrors dashboardData.objectId for getTracingComapreTable. */
-    objectId: dashboardData?.objectId ?? null,
-    advancedFilters: myData || [],
-    dashboardData,
-    saveFilters: saveFilters || null,
-    tableName: tableName || null,
-  });
+  const buildAiFilters = () => {
+    const dashOid = dashboardData?.objectId;
+    const hasDashOid =
+      dashOid !== undefined &&
+      dashOid !== null &&
+      String(dashOid).trim() !== "";
+    let objectId;
+    if (hasDashOid) {
+      objectId = dashOid;
+    } else if (ADMIN_AI_OBJECT_SCOPE_PATHS.has(pathname)) {
+      const r = selectedObject;
+      objectId = r && String(r).trim() !== "" ? r : null;
+    } else {
+      objectId = dashOid ?? null;
+    }
+    return {
+      tableId,
+      viewId,
+      jobName: jobName || null,
+      /** Register/detailed: dashboardData.objectId; admin lists: Redux object picker; all-object → null. */
+      objectId,
+      advancedFilters: myData || [],
+      dashboardData,
+      saveFilters: saveFilters || null,
+      tableName: tableName || null,
+    };
+  };
 
   const getAiErrorMessage = (error, fallbackMessage) => {
     const errBody = error?.response?.data;
@@ -2451,26 +2501,61 @@ const DataTable = ({
     }
   };
 
+  const handleRunAnalysisRef = useRef(handleRunAnalysis);
+  handleRunAnalysisRef.current = handleRunAnalysis;
+  const aiResultRef = useRef(aiResult);
+  aiResultRef.current = aiResult;
+
   useEffect(() => {
     if (!isAiSupportedPage) return;
     const pending = consumeGlobalChatInsightNavForRoute(pathname);
     if (!pending) return;
+
+    if (pending.objectId != null && String(pending.objectId).trim() !== "") {
+      dispatch(setSelectedObject(String(pending.objectId)));
+      if (pending.objectName) dispatch(setSelectedObjectName(String(pending.objectName)));
+    } else {
+      dispatch(clearSelectedObject());
+      dispatch(setSelectedObjectName(""));
+    }
+
+    const addedFromGlobal = Array.isArray(pending.addedInsights) ? pending.addedInsights.filter((x) => x && x.text) : [];
+    const applyAddedInsights = (base) => {
+      if (!addedFromGlobal.length) return base;
+      const safeBase = base && typeof base === "object" ? base : {};
+      const current = Array.isArray(safeBase.totalInsights) ? safeBase.totalInsights : [];
+      const appended = addedFromGlobal.map((item) => ({
+        title: String(item.title || "Chat insight").slice(0, 100),
+        text: String(item.text || "").slice(0, 1800),
+        severity: String(item.severity || "medium"),
+        source: "chat",
+      }));
+      return { ...safeBase, totalInsights: [...current, ...appended] };
+    };
     const titles = Array.isArray(pending.kpis) ? pending.kpis.filter(Boolean) : [];
-    if (!titles.length) return;
     const actionMap = buildKpiActionMap(titles);
     const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
     const category = dashboardData?.tableType || "generic";
-    const persistedHidden = loadHiddenInsightIds(user?.id, pageId, category);
-    setHiddenInsightIds(persistedHidden);
-    setQueuedKpiRequests(titles);
-    setKpiTitleActions(actionMap);
-    setAiDialogOpen(true);
-    if (aiResult) {
-      setAiResult((prev) => applyKpiActionOverrides(prev, actionMap));
-      return;
-    }
-    void handleRunAnalysis(undefined, { kpiActionMap: actionMap });
-  }, [pathname, isAiSupportedPage]);
+
+    const timerId = window.setTimeout(() => {
+      const persistedHidden = loadHiddenInsightIds(user?.id, pageId, category);
+      setHiddenInsightIds(persistedHidden);
+      setQueuedKpiRequests(titles);
+      setKpiTitleActions(actionMap);
+      setAiDialogOpen(true);
+      if (aiResultRef.current) {
+        setAiResult((prev) => applyAddedInsights(applyKpiActionOverrides(prev, actionMap)));
+        return;
+      }
+      void handleRunAnalysisRef.current(undefined, { kpiActionMap: actionMap }).then(() => {
+        if (addedFromGlobal.length) {
+          setAiResult((prev) => applyAddedInsights(prev));
+        }
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timerId);
+  }, [pathname, isAiSupportedPage, dispatch, user?.id, dashboardData?.tableType]);
 
   const userWantsInsightsRefresh = (text) => {
     const t = (text || "").toLowerCase();
@@ -3422,6 +3507,8 @@ const DataTable = ({
         maxWidth="lg"
         scroll="paper"
         slotProps={{
+          root: { sx: { zIndex: 1400 } },
+          backdrop: { sx: { zIndex: 1399 } },
           paper: {
             className:
               "rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80 flex flex-col max-h-[min(90vh,calc(100dvh-48px))]",

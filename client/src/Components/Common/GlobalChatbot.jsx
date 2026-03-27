@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useSelector } from "react-redux";
 import {
   Button,
@@ -19,6 +19,7 @@ import { getRequest as getAdminRequest } from "../../Service/Console.service";
 import AiChatAssistantMessage from "./AiChatAssistantMessage";
 import { AiChatContextStrip } from "./AiInsightContent";
 import { normalizeKpiTitle } from "../../Utils/aiChatKpiExtract";
+import { canonicalInsightTargetRoute, saveGlobalChatInsightNav } from "../../Utils/globalChatInsightNav";
 
 const ALL_OBJECT = "__all__";
 const LEGACY_HEADER_OBJECT = "__header__";
@@ -52,9 +53,15 @@ const canRenderChart = (chart) => {
   const values = Array.isArray(series?.[0]?.values) ? series[0].values : [];
   return labels.length > 0 && values.length > 0;
 };
+const toAppRoute = (pageId) => {
+  const raw = String(pageId || "").trim();
+  if (!raw) return "";
+  return raw.startsWith("/") ? raw : `/${raw}`;
+};
 
 const GlobalChatbot = () => {
   const location = useLocation();
+  const navigate = useNavigate();
   const user = useSelector((state) => state.auth?.user);
   const [open, setOpen] = useState(false);
   const [onboardDone, setOnboardDone] = useState(false);
@@ -131,6 +138,7 @@ const GlobalChatbot = () => {
             addedToInsights: Boolean(m.addedToInsights),
             disableAnswerActions: Boolean(m.disableAnswerActions),
             isIntroCard: Boolean(m.isIntroCard),
+            scope: m.scope || null,
             insight: m.insight || null,
             charts: Array.isArray(m.charts) ? m.charts : [],
             kpisSnapshot: Array.isArray(m.kpisSnapshot) ? m.kpisSnapshot : [],
@@ -284,6 +292,29 @@ const GlobalChatbot = () => {
   ]);
 
   const moduleKeyForApi = consoleType === "data" ? dataModule : adminModule;
+  const insightTargetRoute = useMemo(() => {
+    if (consoleType === "admin") {
+      if (adminModule === "import-status") return "/admin-console/import-status";
+      if (adminModule === "saved-jobs") return "/admin-console/saved-jobs";
+      if (adminModule === "ar-mapping") return "/admin-console/ar-mapping";
+      if (adminModule === "ar-rules") return "/admin-console/ar-rules";
+      return "/admin-console";
+    }
+    if (consoleType !== "data") return "";
+    if (dataModule === "reports") {
+      return reportJobName
+        ? `/data-console/reports/original-source/jobs/${reportJobName}`
+        : "/data-console/reports/original-source";
+    }
+    if (dataModule === "register") return "/data-console/register/detailed";
+    if (dataModule === "security") {
+      const sub = securitySubModule || "users";
+      if (sub === "permissions") return "/data-console/security/permission";
+      return `/data-console/security/${sub}`;
+    }
+    if (dataModule === "dashboards") return "/data-console";
+    return "";
+  }, [consoleType, adminModule, dataModule, reportJobName, securitySubModule]);
 
   const canStartChat = useMemo(() => {
     if (modelsLoading) return false;
@@ -292,6 +323,12 @@ const GlobalChatbot = () => {
     }
     return true;
   }, [modelsLoading, consoleType, dataModule, resolvedObjectId]);
+  const canGoToInsight = useMemo(() => {
+    if (!onboardDone) return false;
+    if (!insightTargetRoute) return false;
+    if (consoleType === "data" && dataModule === "register" && !resolvedObjectId) return false;
+    return true;
+  }, [onboardDone, insightTargetRoute, consoleType, dataModule, resolvedObjectId]);
 
   const scopeSummary = useMemo(() => {
     const objLabel =
@@ -413,6 +450,7 @@ const GlobalChatbot = () => {
           insight: res?.insight || null,
           charts: Array.isArray(res?.charts) ? res.charts : [],
           kpisSnapshot: Array.isArray(res?.insight?.kpis) ? res.insight.kpis : [],
+          scope: res?.scope || null,
           enableKpiPanel: false,
           feedbackType: "",
           addedToInsights: false,
@@ -455,13 +493,19 @@ const GlobalChatbot = () => {
   const handleChatMessageFeedback = useCallback(
     async (message, feedbackType) => {
       if (!message?.messageId || !feedbackType) return;
+      const scope = message?.scope || {};
+      const pageIdForFeedback =
+        String(scope?.resolvedPageId || "").trim() ||
+        (location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname);
+      const categoryForFeedback = String(scope?.resolvedCategory || "").trim() || "global-chat";
+      const filtersForFeedback = scope?.resolvedFilters || contextFilters;
       try {
         await submitInsightFeedback({
           orgId: user?.orgId || "default-org",
           userId: effectiveUserId,
-          pageId: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
-          category: "global-chat",
-          filters: contextFilters,
+          pageId: pageIdForFeedback,
+          category: categoryForFeedback,
+          filters: filtersForFeedback,
           kpiId: message.messageId,
           insightType: "chat_answer",
           feedbackType,
@@ -497,7 +541,33 @@ const GlobalChatbot = () => {
         };
       })
     );
-  }, []);
+    const scope = message?.scope || {};
+    const targetRoute = toAppRoute(scope?.resolvedPageId) || insightTargetRoute;
+    if (targetRoute) {
+      const titleLine = raw.split(/\n+/).map((x) => x.trim()).find(Boolean) || "Chat insight";
+    saveGlobalChatInsightNav({
+      route: canonicalInsightTargetRoute(targetRoute),
+      objectId: resolvedObjectId,
+      objectName:
+        objects.find((o) => String(o.objectId) === String(resolvedObjectId))?.objectName || "",
+      addedInsights: [{ title: titleLine.slice(0, 100), text: raw.slice(0, 1800), severity: "medium", source: "chat" }],
+    });
+    }
+  }, [insightTargetRoute, resolvedObjectId, objects]);
+
+  const handleGoToInsight = useCallback(() => {
+    if (!canGoToInsight || !insightTargetRoute) return;
+    const path = canonicalInsightTargetRoute(insightTargetRoute);
+    saveGlobalChatInsightNav({
+      route: path,
+      objectId: resolvedObjectId,
+      objectName:
+        objects.find((o) => String(o.objectId) === String(resolvedObjectId))?.objectName || "",
+      kpis: [],
+      addedInsights: [],
+    });
+    navigate(path);
+  }, [canGoToInsight, insightTargetRoute, resolvedObjectId, objects, navigate]);
 
   const handleSend = async () => {
     const question = chatInput.trim();
@@ -527,6 +597,7 @@ const GlobalChatbot = () => {
           insight: res?.insight || null,
           charts: Array.isArray(res?.charts) ? res.charts : [],
           kpisSnapshot: Array.isArray(res?.insight?.kpis) ? res.insight.kpis : [],
+          scope: res?.scope || null,
           enableKpiPanel: true,
           feedbackType: "",
           addedToInsights: false,
@@ -623,6 +694,19 @@ const GlobalChatbot = () => {
               <div className="flex shrink-0 items-center gap-1 pt-0.5">
                 {onboardDone && (
                   <>
+                    <button
+                      type="button"
+                      className={`text-[10px] px-2.5 py-1 rounded-full border transition-colors ${
+                        canGoToInsight
+                          ? "border-emerald-200/80 bg-emerald-500/20 text-white hover:bg-emerald-500/30"
+                          : "border-white/20 bg-white/5 text-white/60 cursor-not-allowed"
+                      }`}
+                      onClick={handleGoToInsight}
+                      disabled={!canGoToInsight}
+                      aria-label="Go to insight"
+                    >
+                      Go to insight
+                    </button>
                     <button
                       type="button"
                       className="text-[10px] px-2.5 py-1 rounded-full border border-white/35 bg-white/10 text-white hover:bg-white/20 transition-colors"

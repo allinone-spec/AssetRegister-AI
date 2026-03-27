@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 import hashlib
 import json
+import math
 import re
 import threading
 import time
@@ -587,7 +588,8 @@ def _build_backend_headers(settings: Settings, request: Optional[Request] = None
 
 
 def _is_supported_page_id(page_id: str) -> bool:
-    return page_id in {
+    normalized = _normalize_page_id_alias(page_id)
+    return normalized in {
         "data-console/overview",
         "data-console/reports/original-source",
         "data-console/reports/by-ar-resource",
@@ -601,13 +603,26 @@ def _is_supported_page_id(page_id: str) -> bool:
         "admin-console/overview/saved-jobs",
         "admin-console/overview/ar-mapping",
         "admin-console/overview/ar-rules",
-    } or page_id.startswith("data-console/reports/original-source/jobs/") or page_id.startswith(
+    } or normalized.startswith("data-console/reports/original-source/jobs/") or normalized.startswith(
         "data-console/reports/by-ar-resource/jobs/"
     )
 
 
+def _normalize_page_id_alias(page_id: str) -> str:
+    raw = str(page_id or "").strip().lstrip("/")
+    alias_map = {
+        "admin-console/import-status": "admin-console/overview/import-status",
+        "admin-console/saved-jobs": "admin-console/overview/saved-jobs",
+        "admin-console/ar-mapping": "admin-console/overview/ar-mapping",
+        "admin-console/ar-rules": "admin-console/overview/ar-rules",
+        "data-console/security/permission": "data-console/security/permissions",
+    }
+    return alias_map.get(raw, raw)
+
+
 def _ensure_supported_page_id(page_id: str) -> None:
-    if not _is_supported_page_id(page_id):
+    normalized = _normalize_page_id_alias(page_id)
+    if not _is_supported_page_id(normalized):
         raise HTTPException(
             status_code=400,
             detail=(
@@ -858,7 +873,7 @@ def _dataset_key(
     resolved_model_id: Optional[str] = None,
 ) -> str:
     # Bump this to force re-generation when we change prompt structure/context injection.
-    analysis_cache_version = "register-tracing-v10-register-total-records-kpi"
+    analysis_cache_version = "register-tracing-v12-admin-ar-mapping-rules-job-grid"
     raw = {
         "orgId": payload.orgId,
         "userId": payload.userId,
@@ -986,8 +1001,10 @@ def fetch_security_console_rows(
     payload: AnalyzeRequest,
     request: Optional[Request] = None,
 ) -> List[Dict[str, Any]]:
-    page_id = payload.pageId or ""
+    page_id = _normalize_page_id_alias(payload.pageId or "")
     sub = page_id.rsplit("/", 1)[-1].strip().lower()
+    if sub == "permission":
+        sub = "permissions"
     paths = {
         "users": "/user/readAll",
         "groups": "/groups/readAll",
@@ -1022,15 +1039,99 @@ def _dashboard_data_dict(payload: Optional[AnalyzeRequest]) -> Dict[str, Any]:
 
 def _scope_object_filter(payload: Optional[AnalyzeRequest]) -> Optional[str]:
     """None = all objects; otherwise filter to this object id string."""
-    raw = _dashboard_data_dict(payload).get("objectId")
-    if raw is None or str(raw).strip() == "" or str(raw).strip().lower() in ("all", "*", "null", "undefined"):
+    if payload is None:
         return None
-    return str(raw).strip()
+    flt = payload.filters or {}
+    dd = flt.get("dashboardData") or {}
+    # Client analyze payloads put objectId on filters; register pages may use dashboardData only.
+    raw = flt.get("objectId")
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        raw = dd.get("objectId")
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or s.lower() in ("all", "*", "null", "undefined"):
+        return None
+    return s
+
+
+def _normalize_object_id_scalar(v: Any) -> str:
+    """Compare object ids from UI (string) with Spring rows (int / str / float)."""
+    if v is None or v is False:
+        return ""
+    if isinstance(v, bool):
+        return ""
+    if isinstance(v, float):
+        if math.isfinite(v) and float(int(v)) == v:
+            return str(int(v))
+        return str(v).strip()
+    if isinstance(v, int):
+        return str(v)
+    s = str(v).strip()
+    return s
+
+
+_OBJECT_SCOPE_ROW_KEYS = (
+    "object",
+    "objectId",
+    "objectName",
+    "Object",
+    "OBJECT",
+    "object_id",
+    "objId",
+    "obj_id",
+)
+
+
+def _row_object_scope_candidates(row: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for key in _OBJECT_SCOPE_ROW_KEYS:
+        if key not in row:
+            continue
+        nv = _normalize_object_id_scalar(row.get(key))
+        if nv and nv not in seen:
+            seen.add(nv)
+            out.append(nv)
+    return out
 
 
 def _row_matches_scope_object(row: Dict[str, Any], object_id: str) -> bool:
-    v = _pick_first_present(row, ["object", "objectId", "objectName"])
-    return str(v) == str(object_id)
+    want = _normalize_object_id_scalar(object_id)
+    if not want:
+        return False
+    candidates = _row_object_scope_candidates(row)
+    if not candidates:
+        return False
+    return want in candidates
+
+
+def _row_matches_scope_object_loose(row: Dict[str, Any], object_id: str) -> bool:
+    """
+    Import Status rows are usually API-scoped by POST objectId; some rows omit object fields.
+    When scoped, drop rows that explicitly carry a different object; keep rows with no object field.
+    """
+    want = _normalize_object_id_scalar(object_id)
+    if not want:
+        return True
+    candidates = _row_object_scope_candidates(row)
+    if not candidates:
+        return True
+    return want in candidates
+
+
+def _apply_admin_module_object_scope(
+    rows: Any,
+    module_key: str,
+    obj_scope: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Filter admin module rows to filters.objectId vs row object / objectId (strict except import-status)."""
+    dict_rows = [r for r in (rows or []) if isinstance(r, dict)]
+    if not obj_scope:
+        return dict_rows
+    mk = (module_key or "").strip().lower()
+    matcher = _row_matches_scope_object_loose if mk == "import-status" else _row_matches_scope_object
+    return [r for r in dict_rows if matcher(r, obj_scope)]
 
 
 def _count_by_keys(rows: List[Dict[str, Any]], keys: List[str], top_n: int = 8) -> Dict[str, int]:
@@ -1043,11 +1144,73 @@ def _count_by_keys(rows: List[Dict[str, Any]], keys: List[str], top_n: int = 8) 
     return {k: int(v) for k, v in ordered}
 
 
+def _job_schedule_filter_key_for_module(module: str, user_id: str) -> str:
+    """Matches React Commom_Saved_Job: savedJobs_/ARMapping_/ARRules_ + user-id."""
+    mod = (module or "").strip().lower()
+    if mod == "saved-jobs":
+        prefix = "savedJobs"
+    elif mod == "ar-mapping":
+        prefix = "ARMapping"
+    elif mod == "ar-rules":
+        prefix = "ARRules"
+    else:
+        prefix = "savedJobs"
+    uid = (user_id or "").strip()
+    return f"{prefix}_{uid}" if uid else prefix
+
+
+def _fetch_admin_job_schedule_rows(
+    settings: Settings,
+    headers: Dict[str, str],
+    payload: Optional[AnalyzeRequest],
+    list_module: str,
+) -> List[Dict[str, Any]]:
+    """
+    Same grid as Saved Jobs / AR Mapping / AR Rules admin pages: POST jobSchedule/getJobs
+    with the page-specific filterKey and objectId scope.
+    """
+    filters = (payload.filters if payload is not None else {}) or {}
+    dashboard = filters.get("dashboardData") or {}
+    user_id = str((payload.userId if payload is not None else "") or "").strip()
+    user_name = dashboard.get("userName") or filters.get("userName") or ""
+    scoped_jobs_obj = _scope_object_filter(payload) if payload is not None else None
+    body = {
+        "sortColumns": None,
+        "viewId": None,
+        "filterKey": _job_schedule_filter_key_for_module(list_module, user_id),
+        "objectId": scoped_jobs_obj,
+        "primaryKey": None,
+        "orderColumnHeaders": [],
+        "createdSTP": None,
+        "createdBy": None,
+        "updatedBy": None,
+        "updatedSTP": None,
+        "userName": user_name,
+        "searchText": None,
+        "filterExpression": None,
+        "selectedKeys": None,
+        "tableName": "jobSchedule",
+        "xDaysFilter": None,
+        "xFilter": False,
+    }
+    jobs_url = f"{settings.assetregister_admin_console_base_url}/jobSchedule/getJobs?page=-1&size=1000"
+    data = _request_json_with_methods(
+        ["POST", "GET"],
+        jobs_url,
+        headers,
+        body=body,
+        allow_invalid_json=True,
+    )
+    return _extract_rows(data, f"admin job schedule ({list_module})")
+
+
 def _fetch_admin_console_module_rows(
     settings: Settings,
     module_key: str,
     headers: Dict[str, str],
     payload: Optional[AnalyzeRequest] = None,
+    *,
+    analyze_page_dataset: bool = False,
 ) -> List[Dict[str, Any]]:
     module = (module_key or "").strip().lower()
     if module == "import-status":
@@ -1060,11 +1223,8 @@ def _fetch_admin_console_module_rows(
             or ""
         )
         dd = _dashboard_data_dict(payload)
-        obj_for_status = dd.get("objectId")
-        if obj_for_status is None or str(obj_for_status).strip().lower() in ("all", "*", ""):
-            object_id_field = ""
-        else:
-            object_id_field = str(obj_for_status).strip()
+        scoped = _scope_object_filter(payload)
+        object_id_field = scoped if scoped else ""
         import_status_body = {
             "sortColumns": None,
             "viewId": None,
@@ -1098,56 +1258,18 @@ def _fetch_admin_console_module_rows(
         return _extract_rows(data, "admin import status")
 
     if module == "saved-jobs":
-        filters = (payload.filters if payload is not None else {}) or {}
-        dashboard = filters.get("dashboardData") or {}
-        user_id = str((payload.userId if payload is not None else "") or "").strip()
-        user_name = (
-            dashboard.get("userName")
-            or filters.get("userName")
-            or ""
-        )
-        scoped_jobs_obj = _scope_object_filter(payload) if payload is not None else None
-        saved_jobs_body = {
-            "sortColumns": None,
-            "viewId": None,
-            "filterKey": f"savedJobs_{user_id}" if user_id else "savedJobs",
-            "objectId": scoped_jobs_obj,
-            "primaryKey": None,
-            "orderColumnHeaders": [],
-            "createdSTP": None,
-            "createdBy": None,
-            "updatedBy": None,
-            "updatedSTP": None,
-            "userName": user_name,
-            "searchText": None,
-            "filterExpression": None,
-            "selectedKeys": None,
-            "tableName": "jobSchedule",
-            "xDaysFilter": None,
-            "xFilter": False,
-        }
-        jobs_url = f"{settings.assetregister_admin_console_base_url}/jobSchedule/getJobs?page=-1&size=1000"
-        data = _request_json_with_methods(
-            ["POST", "GET"],
-            jobs_url,
-            headers,
-            body=saved_jobs_body,
-            allow_invalid_json=True,
-        )
-        return _extract_rows(data, "admin saved jobs")
+        return _fetch_admin_job_schedule_rows(settings, headers, payload, "saved-jobs")
 
     if module == "ar-mapping":
-        mapping_url = f"{settings.assetregister_admin_console_base_url}/filter/mappedColumns"
-        data = _request_json_with_methods(["GET", "POST"], mapping_url, headers, body={})
-        if isinstance(data, dict) and isinstance(data.get("data"), list):
-            return data.get("data") or []
-        if isinstance(data, list):
-            return data
-        return []
+        # UI lists mapping jobs via getJobs + filterKey ARMapping_{userId}, not /filter/mappedColumns.
+        return _fetch_admin_job_schedule_rows(settings, headers, payload, "ar-mapping")
 
     if module == "ar-rules":
-        # AR rules are object-scoped; discover objects from saved jobs.
-        jobs_rows = _fetch_admin_console_module_rows(settings, "saved-jobs", headers, payload)
+        # Analyze on /admin-console/ar-rules matches the job grid (ARRules filterKey), not raw /rules/get rows.
+        if analyze_page_dataset:
+            return _fetch_admin_job_schedule_rows(settings, headers, payload, "ar-rules")
+        # Admin overview: aggregate rule definitions; discover objects from AR Rules job list.
+        jobs_rows = _fetch_admin_job_schedule_rows(settings, headers, payload, "ar-rules")
         rows: List[Dict[str, Any]] = []
         object_ids: List[Any] = []
         scoped = _scope_object_filter(payload)
@@ -1155,12 +1277,13 @@ def _fetch_admin_console_module_rows(
             object_ids = [scoped]
         else:
             for row in jobs_rows:
-                obj = _pick_first_present(row, ["object", "objectId"])
+                obj = _pick_first_present(row, ["object", "objectId", "Object", "object_id"])
                 if obj is not None and obj not in object_ids:
                     object_ids.append(obj)
         for obj in object_ids[:30]:
             try:
-                rules_url = f"{settings.assetregister_admin_console_base_url}/rules/get?objectId={obj}"
+                oid_q = requests.utils.quote(str(obj), safe="")
+                rules_url = f"{settings.assetregister_admin_console_base_url}/rules/get?objectId={oid_q}"
                 data = _request_json_with_methods(["GET", "POST"], rules_url, headers, body={})
                 if isinstance(data, list):
                     rows.extend(data)
@@ -1181,8 +1304,12 @@ def fetch_admin_console_module_rows(
     page_id = (payload.pageId or "").split("?", 1)[0].rstrip("/")
     module_key = page_id.rsplit("/", 1)[-1]
     headers = _build_backend_headers(settings, request)
-    rows = _fetch_admin_console_module_rows(settings, module_key, headers, payload)
-    return rows if isinstance(rows, list) else []
+    rows = _fetch_admin_console_module_rows(
+        settings, module_key, headers, payload, analyze_page_dataset=True
+    )
+    if not isinstance(rows, list):
+        rows = []
+    return _apply_admin_module_object_scope(rows, module_key, _scope_object_filter(payload))
 
 
 def fetch_admin_console_overview_rows(
@@ -1230,9 +1357,10 @@ def fetch_admin_console_overview_rows(
 
     obj_scope = _scope_object_filter(payload)
     if obj_scope:
-        jobs_rows = [r for r in jobs_rows if _row_matches_scope_object(r, obj_scope)]
-        mapped_rows = [r for r in mapped_rows if _row_matches_scope_object(r, obj_scope)]
-        rules_rows = [r for r in rules_rows if _row_matches_scope_object(r, obj_scope)]
+        status_rows = _apply_admin_module_object_scope(status_rows, "import-status", obj_scope)
+        jobs_rows = _apply_admin_module_object_scope(jobs_rows, "saved-jobs", obj_scope)
+        mapped_rows = _apply_admin_module_object_scope(mapped_rows, "ar-mapping", obj_scope)
+        rules_rows = _apply_admin_module_object_scope(rules_rows, "ar-rules", obj_scope)
 
     # Compact synthetic records for AI analysis quality and token efficiency.
     rows: List[Dict[str, Any]] = []
@@ -1523,9 +1651,10 @@ def _build_admin_console_overview_response(
 
     obj = _scope_object_filter(payload)
     if obj:
-        jobs_rows = [r for r in jobs_rows if _row_matches_scope_object(r, obj)]
-        mapped_rows = [r for r in mapped_rows if _row_matches_scope_object(r, obj)]
-        rules_rows = [r for r in rules_rows if _row_matches_scope_object(r, obj)]
+        status_rows = _apply_admin_module_object_scope(status_rows, "import-status", obj)
+        jobs_rows = _apply_admin_module_object_scope(jobs_rows, "saved-jobs", obj)
+        mapped_rows = _apply_admin_module_object_scope(mapped_rows, "ar-mapping", obj)
+        rules_rows = _apply_admin_module_object_scope(rules_rows, "ar-rules", obj)
 
     metrics = _compute_admin_console_dashboard_metrics(status_rows, jobs_rows, mapped_rows, rules_rows)
     metrics["objectScope"] = obj or "ALL"
@@ -5217,35 +5346,36 @@ def _get_rows_for_payload(
     request: Optional[Request] = None,
     snapshot_meta_out: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    _ensure_supported_page_id(payload.pageId)
-    if payload.pageId == "admin-console/overview":
+    page_id = _normalize_page_id_alias(payload.pageId)
+    _ensure_supported_page_id(page_id)
+    if page_id == "admin-console/overview":
         return fetch_admin_console_overview_rows(settings, payload, request)
-    if payload.pageId == "data-console/overview":
+    if page_id == "data-console/overview":
         return fetch_data_console_overview_rows(settings, payload, request)
-    if payload.pageId in {
+    if page_id in {
         "admin-console/overview/import-status",
         "admin-console/overview/saved-jobs",
         "admin-console/overview/ar-mapping",
         "admin-console/overview/ar-rules",
     }:
         return fetch_admin_console_module_rows(settings, payload, request)
-    if payload.pageId in {
+    if page_id in {
         "data-console/reports/original-source",
         "data-console/reports/by-ar-resource",
     }:
         return fetch_original_source_jobs(settings, payload, request)
-    if payload.pageId.startswith("data-console/reports/original-source/jobs/") or payload.pageId.startswith(
+    if page_id.startswith("data-console/reports/original-source/jobs/") or page_id.startswith(
         "data-console/reports/by-ar-resource/jobs/"
     ):
         return fetch_job_table_all(settings, payload, request)
-    if payload.pageId in {
+    if page_id in {
         "data-console/security/users",
         "data-console/security/groups",
         "data-console/security/roles",
         "data-console/security/permissions",
     }:
         return fetch_security_console_rows(settings, payload, request)
-    if payload.pageId == "data-console/register/detailed":
+    if page_id == "data-console/register/detailed":
         full_rows, total_hint = fetch_register_detailed_all(settings, payload, request)
         if snapshot_meta_out is not None and total_hint is not None:
             snapshot_meta_out["registerTotalRecords"] = int(total_hint)
@@ -5268,7 +5398,7 @@ def _get_rows_for_payload(
                 sampled = (sampled + rows_sorted[-(max_rows - len(sampled)) :])[:max_rows]
             return sampled
         return rows
-    raise HTTPException(status_code=400, detail=f"Unsupported pageId '{payload.pageId}'.")
+    raise HTTPException(status_code=400, detail=f"Unsupported pageId '{page_id}'.")
 
 
 def _run_dataset_snapshot_job(
@@ -5467,7 +5597,7 @@ def _ensure_daily_analysis(
         focus_columns_override=payload.focusColumns if payload.focusColumns else None,
         import_tracing_context=import_tracing_context or None,
         register_tracing_context=register_tracing_context or None,
-        analysis_profile=payload.pageId,
+        analysis_profile=_normalize_page_id_alias(payload.pageId),
         authoritative_row_total=authoritative_register_total,
         persistent_user_memory_text=persistent_user_memory_text,
     )
@@ -5626,18 +5756,9 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
     analysis_summary = analysis.get("analysisSummary", {})
     analysis_context = _build_chat_analysis_context(analysis)
 
-    session_page_id, session_key = _global_chat_pseudo_analyze(
-        payload.orgId,
-        payload.userId,
-        payload.consoleType,
-        payload.moduleKey,
-        payload.route,
-        dict(payload.contextFilters or {}),
-        model_id,
-    )
-
-    session_messages = store.get_chat_messages(day_key, payload.orgId, payload.userId, session_page_id, session_key)
-    feedback = store.get_feedback(day_key, payload.orgId, payload.userId, resolved_page_id, _session_dataset_key(analysis_payload))
+    session_key = _session_dataset_key(analysis_payload)
+    session_messages = store.get_chat_messages(day_key, payload.orgId, payload.userId, resolved_page_id, session_key)
+    feedback = store.get_feedback(day_key, payload.orgId, payload.userId, resolved_page_id, session_key)
     latest_messages = [{"role": m.role, "content": m.content} for m in payload.messages][-10:]
     combined_history = (session_messages + latest_messages)[-24:]
 
@@ -5683,7 +5804,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
         day_key,
         payload.orgId,
         payload.userId,
-        session_page_id,
+        resolved_page_id,
         session_key,
         stored_history,
         analysis_summary,
@@ -5700,6 +5821,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
         "scope": {
             "resolvedPageId": resolved_page_id,
             "resolvedCategory": resolved_category,
+            "resolvedFilters": resolved_filters,
             "consoleType": payload.consoleType,
             "moduleKey": payload.moduleKey or "",
         },
@@ -5712,16 +5834,30 @@ def clear_global_chat_session(payload: GlobalChatSessionRequest, settings: Setti
     store = get_store()
     day_key = utc_day_key()
     model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
-    session_page_id, session_key = _global_chat_pseudo_analyze(
-        payload.orgId,
-        payload.userId,
-        payload.consoleType,
-        payload.moduleKey,
-        payload.route,
-        dict(payload.contextFilters or {}),
-        model_id,
+    resolved_page_id, resolved_category, resolved_filters = _resolve_global_analysis_scope(
+        GlobalChatRequest(
+            orgId=payload.orgId,
+            userId=payload.userId,
+            consoleType=payload.consoleType,
+            moduleKey=payload.moduleKey,
+            route=payload.route,
+            contextFilters=payload.contextFilters,
+            messages=[],
+            modelId=model_id,
+        ),
+        settings,
     )
-    store.clear_chat_messages(day_key, payload.orgId, payload.userId, session_page_id, session_key)
+    analyze_like = AnalyzeRequest(
+        orgId=payload.orgId,
+        userId=payload.userId,
+        pageId=resolved_page_id,
+        category=resolved_category,
+        filters=resolved_filters,
+        modelId=model_id,
+    )
+    session_key = _session_dataset_key(analyze_like)
+    store.clear_chat_messages(day_key, payload.orgId, payload.userId, resolved_page_id, session_key)
+    store.clear_feedback(day_key, payload.orgId, payload.userId, resolved_page_id, session_key)
     return {"ok": True, "message": "Global chat session cleared for this scope."}
 
 

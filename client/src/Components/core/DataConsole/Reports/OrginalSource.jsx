@@ -35,6 +35,7 @@ import AiInsightContent from "../../../Common/AiInsightContent";
 import AiChatAssistantMessage from "../../../Common/AiChatAssistantMessage";
 import { normalizeKpiTitle } from "../../../../Utils/aiChatKpiExtract";
 import {
+  loadHiddenInsightIds,
   persistHiddenInsightIds,
   clearHiddenInsightIds,
 } from "../../../../Utils/aiSessionInsightPrefs";
@@ -42,6 +43,11 @@ import { commentImpliesHideInsight } from "../../../../Utils/aiInsightFeedback";
 import { resolveAiModelSelection } from "../../../../Utils/resolveAiModelSelection";
 import { consumeGlobalChatInsightNavForRoute } from "../../../../Utils/globalChatInsightNav";
 import { setFilters } from "../../../../redux/Slices/AdvancedFilterSlice";
+import {
+  setSelectedObject,
+  setSelectedObjectName,
+  clearSelectedObject,
+} from "../../../../redux/Slices/ObjectSelection";
 import toast from "react-hot-toast";
 
 const ORIGINAL_SOURCE_AI_PAGE = "data-console/reports/original-source";
@@ -464,21 +470,57 @@ const OrginalSource = ({ routeName }) => {
     }
   };
 
+  const handleRunAnalysisRef = useRef(handleRunAnalysis);
+  handleRunAnalysisRef.current = handleRunAnalysis;
+  const aiResultRef = useRef(aiResult);
+  aiResultRef.current = aiResult;
+
   useEffect(() => {
     const pending = consumeGlobalChatInsightNavForRoute(location.pathname);
     if (!pending) return;
-    const titles = Array.isArray(pending.kpis) ? pending.kpis.filter(Boolean) : [];
-    if (!titles.length) return;
-    const actionMap = buildKpiActionMap(titles);
-    setQueuedKpiRequests(titles);
-    setKpiTitleActions(actionMap);
-    setAiDialogOpen(true);
-    if (aiResult) {
-      setAiResult((prev) => applyKpiActionOverrides(prev, actionMap));
-      return;
+
+    if (pending.objectId != null && String(pending.objectId).trim() !== "") {
+      dispatch(setSelectedObject(String(pending.objectId)));
+      if (pending.objectName) dispatch(setSelectedObjectName(String(pending.objectName)));
+    } else {
+      dispatch(clearSelectedObject());
+      dispatch(setSelectedObjectName(""));
     }
-    void handleRunAnalysis(undefined, { kpiActionMap: actionMap });
-  }, [location.pathname]);
+
+    const addedFromGlobal = Array.isArray(pending.addedInsights) ? pending.addedInsights.filter((x) => x && x.text) : [];
+    const applyAddedInsights = (base) => {
+      if (!addedFromGlobal.length) return base;
+      const safeBase = base && typeof base === "object" ? base : {};
+      const current = Array.isArray(safeBase.totalInsights) ? safeBase.totalInsights : [];
+      const appended = addedFromGlobal.map((item) => ({
+        title: String(item.title || "Chat insight").slice(0, 100),
+        text: String(item.text || "").slice(0, 1800),
+        severity: String(item.severity || "medium"),
+        source: "chat",
+      }));
+      return { ...safeBase, totalInsights: [...current, ...appended] };
+    };
+    const titles = Array.isArray(pending.kpis) ? pending.kpis.filter(Boolean) : [];
+    const actionMap = buildKpiActionMap(titles);
+
+    const timerId = window.setTimeout(() => {
+      setHiddenInsightIds(loadHiddenInsightIds(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY));
+      setQueuedKpiRequests(titles);
+      setKpiTitleActions(actionMap);
+      setAiDialogOpen(true);
+      if (aiResultRef.current) {
+        setAiResult((prev) => applyAddedInsights(applyKpiActionOverrides(prev, actionMap)));
+        return;
+      }
+      void handleRunAnalysisRef.current(undefined, { kpiActionMap: actionMap }).then(() => {
+        if (addedFromGlobal.length) {
+          setAiResult((prev) => applyAddedInsights(prev));
+        }
+      });
+    }, 0);
+
+    return () => window.clearTimeout(timerId);
+  }, [location.pathname, dispatch, user?.id]);
 
   const userWantsInsightsRefresh = (text) => {
     const t = (text || "").toLowerCase();
@@ -799,6 +841,8 @@ const OrginalSource = ({ routeName }) => {
         maxWidth="lg"
         scroll="paper"
         slotProps={{
+          root: { sx: { zIndex: 1400 } },
+          backdrop: { sx: { zIndex: 1399 } },
           paper: {
             className:
               "rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80 flex flex-col max-h-[min(90vh,calc(100dvh-48px))]",
