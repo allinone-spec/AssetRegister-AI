@@ -17,9 +17,11 @@ import { resolveAiModelSelection } from "../../Utils/resolveAiModelSelection";
 import { getRequest } from "../../Service/api.service";
 import { getRequest as getAdminRequest } from "../../Service/Console.service";
 import AiChatAssistantMessage from "./AiChatAssistantMessage";
+import { AiChatContextStrip } from "./AiInsightContent";
 import { normalizeKpiTitle } from "../../Utils/aiChatKpiExtract";
 
-const HEADER_OBJECT = "__header__";
+const ALL_OBJECT = "__all__";
+const LEGACY_HEADER_OBJECT = "__header__";
 
 const DATA_MODULES = [
   { id: "dashboards", label: "Dashboards" },
@@ -43,20 +45,23 @@ const SECURITY_SUBS = [
   { id: "permissions", label: "Permissions" },
 ];
 
-const GLOBAL_CHATBOT_STATE_KEY = "global-chatbot-state-v2";
 const buildChatMessageId = () => `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const canRenderChart = (chart) => {
+  const labels = Array.isArray(chart?.xAxis) ? chart.xAxis : [];
+  const series = Array.isArray(chart?.series) ? chart.series : [];
+  const values = Array.isArray(series?.[0]?.values) ? series[0].values : [];
+  return labels.length > 0 && values.length > 0;
+};
 
 const GlobalChatbot = () => {
   const location = useLocation();
   const user = useSelector((state) => state.auth?.user);
-  const selectedObject = useSelector((state) => state.selectedObject?.value);
-
   const [open, setOpen] = useState(false);
   const [onboardDone, setOnboardDone] = useState(false);
   const [consoleType, setConsoleType] = useState(
     location.pathname.includes("/admin-console") ? "admin" : "data"
   );
-  const [chatObjectId, setChatObjectId] = useState(HEADER_OBJECT);
+  const [chatObjectId, setChatObjectId] = useState(ALL_OBJECT);
   const [dataModule, setDataModule] = useState("dashboards");
   const [adminModule, setAdminModule] = useState("dashboards");
   const [reportJobName, setReportJobName] = useState("");
@@ -72,10 +77,15 @@ const GlobalChatbot = () => {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState("");
   const [kpiTitleActions, setKpiTitleActions] = useState({});
+  const effectiveUserId = user?.id || localStorage.getItem("user-id") || "anonymous";
+  const globalChatStateKey = useMemo(
+    () => `global-chatbot-state-v3:${String(effectiveUserId)}`,
+    [effectiveUserId]
+  );
 
   useEffect(() => {
     try {
-      const raw = sessionStorage.getItem(GLOBAL_CHATBOT_STATE_KEY);
+      const raw = sessionStorage.getItem(globalChatStateKey);
       if (!raw) return;
       const saved = JSON.parse(raw);
       setOpen(Boolean(saved.open));
@@ -83,7 +93,8 @@ const GlobalChatbot = () => {
       setConsoleType(
         saved.consoleType || (location.pathname.includes("/admin-console") ? "admin" : "data")
       );
-      setChatObjectId(saved.chatObjectId ?? HEADER_OBJECT);
+      const savedObject = saved.chatObjectId ?? ALL_OBJECT;
+      setChatObjectId(savedObject === LEGACY_HEADER_OBJECT ? ALL_OBJECT : savedObject);
       setDataModule(saved.dataModule || "dashboards");
       setAdminModule(saved.adminModule || "dashboards");
       setReportJobName(saved.reportJobName || "");
@@ -94,12 +105,12 @@ const GlobalChatbot = () => {
     } catch (e) {
       // ignore invalid cache
     }
-  }, []);
+  }, [globalChatStateKey, location.pathname]);
 
   useEffect(() => {
     try {
       sessionStorage.setItem(
-        GLOBAL_CHATBOT_STATE_KEY,
+        globalChatStateKey,
         JSON.stringify({
           open,
           onboardDone,
@@ -118,6 +129,8 @@ const GlobalChatbot = () => {
             enableKpiPanel: m.enableKpiPanel,
             feedbackType: m.feedbackType || "",
             addedToInsights: Boolean(m.addedToInsights),
+            disableAnswerActions: Boolean(m.disableAnswerActions),
+            isIntroCard: Boolean(m.isIntroCard),
             insight: m.insight || null,
             charts: Array.isArray(m.charts) ? m.charts : [],
             kpisSnapshot: Array.isArray(m.kpisSnapshot) ? m.kpisSnapshot : [],
@@ -128,6 +141,7 @@ const GlobalChatbot = () => {
       // ignore
     }
   }, [
+    globalChatStateKey,
     open,
     onboardDone,
     consoleType,
@@ -142,9 +156,9 @@ const GlobalChatbot = () => {
   ]);
 
   const resolvedObjectId = useMemo(() => {
-    if (chatObjectId === HEADER_OBJECT) return selectedObject ?? null;
+    if (chatObjectId === ALL_OBJECT) return null;
     return chatObjectId || null;
-  }, [chatObjectId, selectedObject]);
+  }, [chatObjectId]);
 
   const loadObjects = useCallback(async () => {
     setObjectsLoading(true);
@@ -275,15 +289,14 @@ const GlobalChatbot = () => {
     if (modelsLoading) return false;
     if (consoleType === "data") {
       if (dataModule === "register" && !resolvedObjectId) return false;
-      if (dataModule === "reports" && reportJobName && !resolvedObjectId) return false;
     }
     return true;
-  }, [modelsLoading, consoleType, dataModule, reportJobName, resolvedObjectId]);
+  }, [modelsLoading, consoleType, dataModule, resolvedObjectId]);
 
   const scopeSummary = useMemo(() => {
     const objLabel =
-      chatObjectId === HEADER_OBJECT
-        ? "Current header object"
+      chatObjectId === ALL_OBJECT
+        ? "All object"
         : objects.find((o) => String(o.objectId) === String(chatObjectId))?.objectName || "Selected object";
     if (consoleType === "admin") {
       const m = ADMIN_MODULES.find((x) => x.id === adminModule);
@@ -319,11 +332,11 @@ const GlobalChatbot = () => {
     aiModels,
   ]);
 
-  /** Compact label for header chip; full sentence in title tooltip */
+  /** Compact label for context chip; full sentence in title tooltip */
   const scopeChipLabel = useMemo(() => {
     const objTag =
-      chatObjectId === HEADER_OBJECT
-        ? "Header object"
+      chatObjectId === ALL_OBJECT
+        ? "All object"
         : (() => {
             const name = objects.find((o) => String(o.objectId) === String(chatObjectId))?.objectName;
             if (!name) return "Object";
@@ -374,19 +387,58 @@ const GlobalChatbot = () => {
     aiModels,
   ]);
 
-  const handleStartChat = () => {
+  const handleStartChat = async () => {
     if (!canStartChat) return;
     setOnboardDone(true);
-    setMessages([
-      {
-        messageId: buildChatMessageId(),
-        role: "assistant",
-        content: `I’m ready with this context: ${scopeSummary}.\n\nAsk naturally. You can ask for summaries, trends, risks, comparisons, KPIs, visuals, or next actions, and I’ll stay grounded in the data available for this scope.`,
-        enableKpiPanel: false,
-        feedbackType: "",
-        addedToInsights: false,
-      },
-    ]);
+    setMessages([]);
+    const introQuestion =
+      "Give me a conversational starter summary for this exact context using raw data. Include key KPIs, trends, risks, recommendations, and useful visuals.";
+    try {
+      setChatLoading(true);
+      const res = await globalChat({
+        orgId: user?.orgId || "default-org",
+        userId: effectiveUserId,
+        consoleType,
+        moduleKey: moduleKeyForApi,
+        route: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
+        contextFilters,
+        modelId: selectedModelId || undefined,
+        messages: [{ role: "user", content: introQuestion }],
+      });
+      setMessages([
+        {
+          messageId: buildChatMessageId(),
+          role: "assistant",
+          content: res?.answer || `I’m ready with this context: ${scopeSummary}.`,
+          insight: res?.insight || null,
+          charts: Array.isArray(res?.charts) ? res.charts : [],
+          kpisSnapshot: Array.isArray(res?.insight?.kpis) ? res.insight.kpis : [],
+          enableKpiPanel: false,
+          feedbackType: "",
+          addedToInsights: false,
+          disableAnswerActions: true,
+          isIntroCard: true,
+        },
+      ]);
+    } catch (err) {
+      setMessages([
+        {
+          messageId: buildChatMessageId(),
+          role: "assistant",
+          content:
+            err?.response?.data?.message ||
+            err?.message ||
+            "I couldn't load the initial context summary. Please try Start conversation again.",
+          enableKpiPanel: false,
+          feedbackType: "",
+          addedToInsights: false,
+          disableAnswerActions: true,
+          isIntroCard: true,
+        },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
   };
 
   const handleToggleKpiLine = useCallback((kpiTitle, checked) => {
@@ -406,7 +458,7 @@ const GlobalChatbot = () => {
       try {
         await submitInsightFeedback({
           orgId: user?.orgId || "default-org",
-          userId: user?.id || localStorage.getItem("user-id") || "anonymous",
+          userId: effectiveUserId,
           pageId: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
           category: "global-chat",
           filters: contextFilters,
@@ -423,7 +475,7 @@ const GlobalChatbot = () => {
         // Ignore feedback failures to keep chat flow smooth.
       }
     },
-    [user?.orgId, user?.id, location.pathname, contextFilters]
+    [user?.orgId, effectiveUserId, location.pathname, contextFilters]
   );
 
   const handleAddToInsights = useCallback(async (message) => {
@@ -458,7 +510,7 @@ const GlobalChatbot = () => {
       setChatLoading(true);
       const res = await globalChat({
         orgId: user?.orgId || "default-org",
-        userId: user?.id || localStorage.getItem("user-id") || "anonymous",
+        userId: effectiveUserId,
         consoleType,
         moduleKey: moduleKeyForApi,
         route: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
@@ -507,14 +559,14 @@ const GlobalChatbot = () => {
   const clearPayload = useMemo(
     () => ({
       orgId: user?.orgId || "default-org",
-      userId: user?.id || localStorage.getItem("user-id") || "anonymous",
+      userId: effectiveUserId,
       consoleType,
       moduleKey: moduleKeyForApi,
       route: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
       contextFilters,
       modelId: selectedModelId || undefined,
     }),
-    [user?.orgId, user?.id, consoleType, moduleKeyForApi, location.pathname, contextFilters, selectedModelId]
+    [user?.orgId, effectiveUserId, consoleType, moduleKeyForApi, location.pathname, contextFilters, selectedModelId]
   );
 
   const handleResetConversation = async () => {
@@ -556,7 +608,7 @@ const GlobalChatbot = () => {
 
       {open && (
         <div
-          className="fixed bottom-6 right-6 z-[1200] w-[420px] max-w-[96vw] max-h-[min(640px,92vh)] flex flex-col bg-white rounded-2xl border border-slate-200/90 shadow-2xl shadow-slate-900/15 overflow-hidden ring-1 ring-slate-900/5"
+          className="fixed bottom-6 right-6 z-[1200] w-[420px] max-w-[96vw] h-[min(640px,92vh)] flex flex-col bg-white rounded-2xl border border-slate-200/90 shadow-2xl shadow-slate-900/15 overflow-hidden ring-1 ring-slate-900/5"
           role="dialog"
           aria-label="Global assistant"
         >
@@ -615,7 +667,8 @@ const GlobalChatbot = () => {
           </div>
 
           {!onboardDone ? (
-            <div className="p-4 space-y-4 overflow-y-auto flex-1 min-h-0 bg-gradient-to-b from-slate-50/80 to-white">
+            <div className="p-4 flex flex-col flex-1 min-h-0 bg-gradient-to-b from-slate-50/80 to-white">
+              <div className="space-y-4 overflow-y-auto flex-1 min-h-0 pr-1 [scrollbar-width:thin]">
               <Typography variant="body2" className="text-slate-700 !text-[13px] !leading-relaxed">
                 Choose <strong>object</strong>, <strong>console</strong>, <strong>module</strong>, and (when available){" "}
                 <strong>model</strong> so answers match where you’re working. Then chat in plain language.
@@ -630,7 +683,7 @@ const GlobalChatbot = () => {
                   disabled={objectsLoading}
                   onChange={(e) => setChatObjectId(e.target.value)}
                 >
-                  <MenuItem value={HEADER_OBJECT}>Use object from header</MenuItem>
+                  <MenuItem value={ALL_OBJECT}>All object</MenuItem>
                   {objects.map((obj) => (
                     <MenuItem key={obj.objectId} value={String(obj.objectId)}>
                       {obj.objectName || obj.objectId}
@@ -751,12 +804,14 @@ const GlobalChatbot = () => {
                   object to load rows.
                 </Typography>
               )}
-              {consoleType === "data" && dataModule === "reports" && reportJobName && !resolvedObjectId && (
+              {consoleType === "data" && dataModule === "reports" && reportJobName && chatObjectId !== ALL_OBJECT && !resolvedObjectId && (
                 <Typography variant="caption" className="text-amber-800 block">
-                  Pick an object (or set the header object) to analyze a specific job’s table.
+                  Pick a specific object or choose All object to analyze this job across objects.
                 </Typography>
               )}
+              </div>
 
+              <div className="mt-3 pt-3 border-t border-slate-200/80 bg-white/80 rounded-xl">
               <Button
                 variant="contained"
                 fullWidth
@@ -774,17 +829,18 @@ const GlobalChatbot = () => {
               >
                 Start conversation
               </Button>
+              </div>
             </div>
           ) : (
             <div className="p-3 flex flex-col flex-1 min-h-0 bg-slate-50/40">
-              <div className="max-h-[min(380px,48vh)] overflow-y-auto space-y-2.5 pr-1 flex-1 min-h-0 [scrollbar-width:thin]">
+              <div className="overflow-y-auto space-y-2.5 pr-1 flex-1 min-h-0 [scrollbar-width:thin]">
                 {messages.map((m, i) => (
                   <div key={`${m.role}-${i}`} className="space-y-2">
                     <div
                       className={`rounded-xl p-3 text-sm leading-relaxed ${
                         m.role === "user"
                           ? "bg-gradient-to-br from-sky-50 to-blue-50/90 border border-sky-200/70 text-sky-950 ml-5 shadow-sm"
-                          : "bg-white border border-slate-200/90 text-slate-800 mr-5 shadow-sm"
+                          : "rounded-xl border border-violet-200/80 bg-gradient-to-br from-violet-50/90 to-white text-slate-800 mr-5 shadow-sm ring-1 ring-violet-100/50"
                       }`}
                     >
                       {m.role === "user" ? (
@@ -800,58 +856,29 @@ const GlobalChatbot = () => {
                           kpiTitleActions={kpiTitleActions}
                           onToggleKpiLine={handleToggleKpiLine}
                           kpiPanelHelpText="Tick lines to remember KPI ideas for this chat session."
-                          onMessageFeedback={handleChatMessageFeedback}
-                          onAddToInsight={handleAddToInsights}
+                          onMessageFeedback={m?.disableAnswerActions ? undefined : handleChatMessageFeedback}
+                          onAddToInsight={m?.disableAnswerActions ? undefined : handleAddToInsights}
+                          showAnswerActions={!m?.disableAnswerActions}
                         />
                       )}
                     </div>
 
-                    {m.role === "assistant" && (m.insight || (m.charts && m.charts.length > 0)) ? (
+                    {m.role === "assistant" &&
+                    Array.isArray(m.charts) &&
+                    m.charts.some((chart) => canRenderChart(chart)) ? (
                       <div className="rounded-xl border border-violet-200/80 bg-gradient-to-br from-violet-50/90 to-white p-3 text-xs text-slate-800 space-y-2 mr-5 shadow-sm ring-1 ring-violet-100/50">
                         <div className="font-semibold text-violet-900 flex items-center gap-1.5">
                           <Sparkles size={12} className="opacity-80" aria-hidden />
                           Insights & visuals
                         </div>
-
-                        {!!(m.insight?.trends || []).length && (
-                          <div className="rounded-lg border border-sky-100 bg-white/95 p-2 shadow-sm">
-                            <div className="text-[11px] font-semibold text-slate-700 mb-1">Trends</div>
-                            {(m.insight.trends || []).slice(0, 3).map((t, idx) => (
-                              <div key={`t-${i}-${idx}`} className="mb-1 last:mb-0">
-                                • {t?.text || t?.insight || String(t)}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {!!(m.insight?.risks || []).length && (
-                          <div className="rounded-lg border border-red-100 bg-white/95 p-2 shadow-sm">
-                            <div className="text-[11px] font-semibold text-slate-700 mb-1">Risks</div>
-                            {(m.insight.risks || []).slice(0, 3).map((r, idx) => (
-                              <div key={`r-${i}-${idx}`} className="mb-1 last:mb-0">
-                                • {r?.text || r?.insight || String(r)}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {!!(m.insight?.recommendations || []).length && (
-                          <div className="rounded-lg border border-emerald-100 bg-white/95 p-2 shadow-sm">
-                            <div className="text-[11px] font-semibold text-slate-700 mb-1">Recommendations</div>
-                            {(m.insight.recommendations || []).slice(0, 3).map((rec, idx) => (
-                              <div key={`rec-${i}-${idx}`} className="mb-1 last:mb-0">
-                                • {rec?.text || rec?.insight || String(rec)}
-                              </div>
-                            ))}
-                          </div>
-                        )}
+                        <AiChatContextStrip charts={(m.charts || []).filter((chart) => canRenderChart(chart)).slice(0, 3)} kpisSnapshot={[]} maxCharts={3} />
                       </div>
                     ) : null}
                   </div>
                 ))}
               </div>
 
-              <div className="mt-2 flex gap-2 items-stretch shrink-0 pt-1 border-t border-slate-200/80">
+              <div className="mt-auto flex gap-2 items-stretch shrink-0 pt-3 border-t border-slate-200/80 bg-white/80 rounded-xl">
                 <TextField
                   size="small"
                   fullWidth

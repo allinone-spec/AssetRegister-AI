@@ -3188,7 +3188,46 @@ def _build_chat_turn_prompt(
     return "".join(parts)
 
 
-def _resolve_global_analysis_scope(payload: GlobalChatRequest) -> tuple[str, str, Dict[str, Any]]:
+def _resolve_object_id_for_global_report_job(
+    settings: Settings,
+    org_id: str,
+    user_id: str,
+    job_name: str,
+    request: Optional[Request] = None,
+) -> Optional[str]:
+    job = str(job_name or "").strip()
+    if not job:
+        return None
+    try:
+        probe_payload = AnalyzeRequest(
+            orgId=org_id,
+            userId=user_id,
+            pageId="data-console/reports/original-source",
+            category="jobs",
+            filters={"dashboardData": {"tableType": "original-source", "dataSource": "AC"}},
+        )
+        rows = fetch_original_source_jobs(settings, probe_payload, request)
+    except Exception:
+        return None
+    target = job.lower()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(_pick_first_present(row, ["jobName", "name"]) or "").strip().lower()
+        if name != target:
+            continue
+        obj = _pick_first_present(row, ["object", "objectId"])
+        if obj is None or str(obj).strip() == "":
+            continue
+        return str(obj).strip()
+    return None
+
+
+def _resolve_global_analysis_scope(
+    payload: GlobalChatRequest,
+    settings: Settings,
+    request: Optional[Request] = None,
+) -> tuple[str, str, Dict[str, Any]]:
     route = str(payload.route or "").strip().lstrip("/")
     module_key = str(payload.moduleKey or "").strip()
     ctx: Dict[str, Any] = dict(payload.contextFilters or {})
@@ -3252,14 +3291,24 @@ def _resolve_global_analysis_scope(payload: GlobalChatRequest) -> tuple[str, str
 
     if data_module == "reports":
         job = str(ctx.get("reportJobName") or "").strip()
+        selected_for_job = selected_object
+        if job and selected_for_job is None:
+            selected_for_job = _resolve_object_id_for_global_report_job(
+                settings,
+                payload.orgId,
+                payload.userId,
+                job,
+                request,
+            )
         dd_rep: Dict[str, Any] = {"tableType": "original-source", "dataSource": "AC"}
-        if selected_object is not None:
-            dd_rep["objectId"] = selected_object
+        if selected_for_job is not None:
+            dd_rep["objectId"] = selected_for_job
         flt_rep: Dict[str, Any] = {**ctx, "dashboardData": dd_rep}
-        if selected_object is not None:
-            flt_rep["objectId"] = selected_object
-        if job and selected_object is not None:
+        if selected_for_job is not None:
+            flt_rep["objectId"] = selected_for_job
+        if job:
             flt_rep["jobName"] = job
+        if job and selected_for_job is not None:
             return f"data-console/reports/original-source/jobs/{job}", "generic", flt_rep
         return "data-console/reports/original-source", "jobs", flt_rep
 
@@ -3323,6 +3372,22 @@ def _resolve_global_analysis_scope(payload: GlobalChatRequest) -> tuple[str, str
             or route == "data-console/register/detailed"
         )
         if needs_object and selected_object is None:
+            candidate_job = str(filters.get("jobName") or (job_segment if job_segment else "")).strip()
+            if candidate_job and candidate_job not in ("jobs", "original-source", "by-ar-resource"):
+                resolved_obj = _resolve_object_id_for_global_report_job(
+                    settings,
+                    payload.orgId,
+                    payload.userId,
+                    candidate_job,
+                    request,
+                )
+                if resolved_obj:
+                    selected_object = resolved_obj
+                    dashboard["objectId"] = selected_object
+                    filters["dashboardData"] = dashboard
+                    filters["objectId"] = selected_object
+
+        if needs_object and selected_object is None:
             if route.startswith("data-console/reports/by-ar-resource"):
                 route = "data-console/reports/by-ar-resource"
             else:
@@ -3370,9 +3435,66 @@ def _question_requests_visuals(question: str) -> bool:
     )
 
 
-def _build_chat_companion_payload(analysis: Dict[str, Any], question: str) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+def _question_is_chart_friendly(question: str, answer: str = "") -> bool:
+    blob = f"{question or ''} {answer or ''}".lower()
+    return bool(
+        re.search(
+            r"\b(compare|comparison|distribution|breakdown|trend|over time|ratio|rate|count|counts|top|highest|lowest|increase|decrease|spike|drop|kpi|metric|status)\b",
+            blob,
+        )
+    )
+
+
+def _select_relevant_chat_charts(
+    charts: List[Dict[str, Any]],
+    question: str,
+    answer: str = "",
+    max_items: int = 3,
+) -> List[Dict[str, Any]]:
+    if not charts:
+        return []
+    query = f"{question or ''} {answer or ''}".lower()
+    q_tokens = {t for t in re.findall(r"[a-z0-9_]+", query) if len(t) >= 3}
+
+    def _chart_text(ch: Dict[str, Any]) -> str:
+        parts: List[str] = [
+            str(ch.get("title") or ""),
+            str(ch.get("id") or ""),
+            str(ch.get("type") or ""),
+        ]
+        if isinstance(ch.get("xAxis"), list):
+            parts.extend(str(x) for x in (ch.get("xAxis") or [])[:20])
+        return " ".join(parts).lower()
+
+    scored: List[tuple[int, Dict[str, Any]]] = []
+    for ch in charts:
+        if not isinstance(ch, dict):
+            continue
+        txt = _chart_text(ch)
+        score = 0
+        for tok in q_tokens:
+            if tok in txt:
+                score += 1
+        if str(ch.get("type") or "").lower() in {"line", "area"} and re.search(r"\btrend|over time|history|daily|weekly\b", query):
+            score += 2
+        if str(ch.get("type") or "").lower() in {"bar", "pie"} and re.search(r"\bdistribution|breakdown|top|status|count\b", query):
+            score += 1
+        scored.append((score, ch))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    positives = [ch for score, ch in scored if score > 0][:max_items]
+    if positives:
+        return positives
+    return charts[: min(max_items, len(charts))]
+
+
+def _build_chat_companion_payload(
+    analysis: Dict[str, Any],
+    question: str,
+    answer: str = "",
+) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     include_insight = _question_requests_insight(question)
-    include_visuals = include_insight or _question_requests_visuals(question)
+    include_visuals = include_insight or _question_requests_visuals(question) or _question_is_chart_friendly(question, answer)
     insight = None
     if include_insight:
         insight = {
@@ -3384,7 +3506,11 @@ def _build_chat_companion_payload(analysis: Dict[str, Any], question: str) -> tu
             "columnInsights": (analysis.get("columnInsights") or [])[:6],
             "rowInsights": (analysis.get("rowInsights") or [])[:6],
         }
-    charts_out = (analysis.get("charts") or [])[:3] if include_visuals else []
+    charts_out = (
+        _select_relevant_chat_charts((analysis.get("charts") or []), question, answer, max_items=3)
+        if include_visuals
+        else []
+    )
     return insight, charts_out
 
 
@@ -5469,7 +5595,7 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
     answer = _llm_chat(settings, model_id, messages, max_tokens=1600)
     stored_history = (combined_history + [{"role": "assistant", "content": answer}])[-24:]
     store.save_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key, stored_history, analysis_summary)
-    insight, charts_out = _build_chat_companion_payload(analysis, latest_user_question)
+    insight, charts_out = _build_chat_companion_payload(analysis, latest_user_question, answer)
     return {
         "answer": answer,
         "insight": insight,
@@ -5486,7 +5612,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
     persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
     persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
 
-    resolved_page_id, resolved_category, resolved_filters = _resolve_global_analysis_scope(payload)
+    resolved_page_id, resolved_category, resolved_filters = _resolve_global_analysis_scope(payload, settings, request)
     analysis_payload = AnalyzeRequest(
         orgId=payload.orgId,
         userId=payload.userId,
@@ -5563,7 +5689,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
         analysis_summary,
     )
 
-    insight, charts_out = _build_chat_companion_payload(analysis, latest_user_question)
+    insight, charts_out = _build_chat_companion_payload(analysis, latest_user_question, answer)
 
     return {
         "answer": answer,
