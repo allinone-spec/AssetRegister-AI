@@ -112,6 +112,7 @@ import AiInsightContent from "./AiInsightContent";
 import AiChatAssistantMessage from "./AiChatAssistantMessage";
 import { normalizeKpiTitle } from "../../Utils/aiChatKpiExtract";
 import { resolveAiModelSelection } from "../../Utils/resolveAiModelSelection";
+import { consumeGlobalChatInsightNavForRoute } from "../../Utils/globalChatInsightNav";
 import toast from "react-hot-toast";
 
 // Column Options Dropdown Component
@@ -2144,9 +2145,23 @@ const DataTable = ({
     }));
   };
 
-  const applyKpiActionOverrides = (result) => {
+  const buildKpiActionMap = (titles = []) => {
+    const out = {};
+    (titles || []).forEach((title) => {
+      const normalized = normalizeKpiTitle(title);
+      if (!normalized) return;
+      out[normalized] = {
+        action: "add",
+        title: String(title || normalized),
+        at: Date.now(),
+      };
+    });
+    return out;
+  };
+
+  const applyKpiActionOverrides = (result, actionMapOverride = null) => {
     if (!result || !Array.isArray(result.kpis)) return result;
-    const actionMap = kpiTitleActions || {};
+    const actionMap = actionMapOverride || kpiTitleActions || {};
     const nextKpis = (result.kpis || []).filter((kpi) => {
       const key = normalizeKpiTitle(kpi?.title);
       const action = actionMap[key]?.action;
@@ -2281,7 +2296,7 @@ const DataTable = ({
 
       setAiRequestDebug(payload);
       const result = await analyzeDataset(payload);
-      setAiResult(applyKpiActionOverrides(result));
+      setAiResult(applyKpiActionOverrides(result, opts?.kpiActionMap || null));
       setAiResponseDebug(result);
     } catch (error) {
       console.error("AI analysis error:", error);
@@ -2301,6 +2316,27 @@ const DataTable = ({
       setAiLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!isAiSupportedPage) return;
+    const pending = consumeGlobalChatInsightNavForRoute(pathname);
+    if (!pending) return;
+    const titles = Array.isArray(pending.kpis) ? pending.kpis.filter(Boolean) : [];
+    if (!titles.length) return;
+    const actionMap = buildKpiActionMap(titles);
+    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const category = dashboardData?.tableType || "generic";
+    const persistedHidden = loadHiddenInsightIds(user?.id, pageId, category);
+    setHiddenInsightIds(persistedHidden);
+    setQueuedKpiRequests(titles);
+    setKpiTitleActions(actionMap);
+    setAiDialogOpen(true);
+    if (aiResult) {
+      setAiResult((prev) => applyKpiActionOverrides(prev, actionMap));
+      return;
+    }
+    void handleRunAnalysis(undefined, { kpiActionMap: actionMap });
+  }, [pathname, isAiSupportedPage]);
 
   const userWantsInsightsRefresh = (text) => {
     const t = (text || "").toLowerCase();
@@ -2351,8 +2387,13 @@ const DataTable = ({
       const assistantMessage = {
         role: "assistant",
         content: result?.answer || "No answer returned from AI.",
+        insight: result?.insight || null,
         charts: Array.isArray(result?.charts) ? result.charts : [],
-        kpisSnapshot: Array.isArray(aiResult?.kpis) ? aiResult.kpis : [],
+        kpisSnapshot: Array.isArray(result?.insight?.kpis)
+          ? result.insight.kpis
+          : Array.isArray(aiResult?.kpis)
+            ? aiResult.kpis
+            : [],
       };
       setChatHistory((prev) => [...prev, assistantMessage]);
       if (userWantsInsightsRefresh(userMessage.content)) {

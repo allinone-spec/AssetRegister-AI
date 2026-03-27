@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
-import { useSelector } from "react-redux";
+import { useLocation, useNavigate } from "react-router-dom";
+import { useDispatch, useSelector } from "react-redux";
 import {
   Button,
   CircularProgress,
@@ -15,7 +15,11 @@ import { MessageCircle, Sparkles, X } from "lucide-react";
 import { clearGlobalChatSession, fetchAiModels, globalChat } from "../../Service/ai.service";
 import { resolveAiModelSelection } from "../../Utils/resolveAiModelSelection";
 import { getRequest } from "../../Service/api.service";
-import { AiChatContextStrip } from "./AiInsightContent";
+import { getRequest as getAdminRequest } from "../../Service/Console.service";
+import AiChatAssistantMessage from "./AiChatAssistantMessage";
+import { normalizeKpiTitle } from "../../Utils/aiChatKpiExtract";
+import { saveGlobalChatInsightNav } from "../../Utils/globalChatInsightNav";
+import { setSelectedObject, setSelectedObjectName } from "../../redux/Slices/ObjectSelection";
 
 const HEADER_OBJECT = "__header__";
 
@@ -45,6 +49,8 @@ const GLOBAL_CHATBOT_STATE_KEY = "global-chatbot-state-v2";
 
 const GlobalChatbot = () => {
   const location = useLocation();
+  const navigate = useNavigate();
+  const dispatch = useDispatch();
   const user = useSelector((state) => state.auth?.user);
   const selectedObject = useSelector((state) => state.selectedObject?.value);
 
@@ -68,6 +74,7 @@ const GlobalChatbot = () => {
   const [aiModels, setAiModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState("");
+  const [kpiTitleActions, setKpiTitleActions] = useState({});
 
   useEffect(() => {
     try {
@@ -85,6 +92,7 @@ const GlobalChatbot = () => {
       setReportJobName(saved.reportJobName || "");
       setSecuritySubModule(saved.securitySubModule || "users");
       setSelectedModelId(saved.selectedModelId || "");
+      setKpiTitleActions(saved.kpiTitleActions || {});
       setMessages(Array.isArray(saved.messages) ? saved.messages.slice(-40) : []);
     } catch (e) {
       // ignore invalid cache
@@ -105,9 +113,11 @@ const GlobalChatbot = () => {
           reportJobName,
           securitySubModule,
           selectedModelId,
+          kpiTitleActions,
           messages: messages.slice(-40).map((m) => ({
             role: m.role,
             content: m.content,
+            enableKpiPanel: m.enableKpiPanel,
           })),
         })
       );
@@ -124,6 +134,7 @@ const GlobalChatbot = () => {
     reportJobName,
     securitySubModule,
     selectedModelId,
+    kpiTitleActions,
     messages,
   ]);
 
@@ -151,9 +162,35 @@ const GlobalChatbot = () => {
   const loadJobs = useCallback(async () => {
     setJobsLoading(true);
     try {
-      const res = await getRequest("/table/get/jobNames", false);
-      if (res?.status === 200 && Array.isArray(res.data)) {
-        setJobRows(res.data);
+      const res = await getAdminRequest("/table/get/jobNames");
+      const rawRows = Array.isArray(res?.data)
+        ? res.data
+        : Array.isArray(res?.data?.data)
+          ? res.data.data
+          : [];
+      if (res?.status === 200) {
+        const ordered = [...rawRows]
+          .map((row) => ({
+            jobName: row?.jobName,
+            ...row,
+          }))
+          .sort((a, b) => {
+          const ap = Number(a?.priority ?? Number.MAX_SAFE_INTEGER);
+          const bp = Number(b?.priority ?? Number.MAX_SAFE_INTEGER);
+          if (ap !== bp) return ap - bp;
+          const an = String(a?.jobName ?? a?.name ?? "");
+          const bn = String(b?.jobName ?? b?.name ?? "");
+          return an.localeCompare(bn, undefined, { sensitivity: "base" });
+        });
+        const uniqueRows = [];
+        const seen = new Set();
+        for (const row of ordered) {
+          const name = String(row?.jobName ?? row?.name ?? "").trim();
+          if (!name || seen.has(name.toLowerCase())) continue;
+          seen.add(name.toLowerCase());
+          uniqueRows.push({ ...row, jobName: name });
+        }
+        setJobRows(uniqueRows);
       } else {
         setJobRows([]);
       }
@@ -163,6 +200,12 @@ const GlobalChatbot = () => {
       setJobsLoading(false);
     }
   }, []);
+
+  const filteredJobRows = useMemo(() => {
+    return resolvedObjectId
+      ? jobRows.filter((job) => job?.object == resolvedObjectId)
+      : jobRows;
+  }, [jobRows, resolvedObjectId]);
 
   useEffect(() => {
     if (!open) return;
@@ -334,10 +377,79 @@ const GlobalChatbot = () => {
     setMessages([
       {
         role: "assistant",
-        content: `Thanks — I’ve set context to: ${scopeSummary}.\n\nAsk in your own words: summaries, counts, risks, how to navigate, or say “show insights” for KPI-style highlights. I’ll stay grounded in the data we load for this scope.`,
+        content: `I’m ready with this context: ${scopeSummary}.\n\nAsk naturally. You can ask for summaries, trends, risks, comparisons, KPIs, visuals, or next actions, and I’ll stay grounded in the data available for this scope.`,
+        enableKpiPanel: false,
       },
     ]);
   };
+
+  const handleToggleKpiLine = useCallback((kpiTitle, checked) => {
+    const key = normalizeKpiTitle(kpiTitle);
+    if (!key) return;
+    setKpiTitleActions((prev) => {
+      const next = { ...prev };
+      if (checked) next[key] = { title: kpiTitle, action: "add" };
+      else delete next[key];
+      return next;
+    });
+  }, []);
+
+  const insightTargetRoute = useMemo(() => {
+    if (consoleType !== "data") return "";
+    if (dataModule === "reports") {
+      return reportJobName
+        ? `/data-console/reports/original-source/jobs/${reportJobName}`
+        : "/data-console/reports/original-source";
+    }
+    if (dataModule === "register") return "/data-console/register/detailed";
+    return "";
+  }, [consoleType, dataModule, reportJobName]);
+
+  const handleGoToInsightPanel = useCallback(
+    (selectedKpis) => {
+      const route = insightTargetRoute;
+      if (!route || !Array.isArray(selectedKpis) || selectedKpis.length === 0) return;
+      const matchedJobRow =
+        dataModule === "reports" && reportJobName
+          ? (filteredJobRows.find((row) => String(row?.jobName || "").trim() === String(reportJobName).trim()) ||
+            jobRows.find((row) => String(row?.jobName || "").trim() === String(reportJobName).trim()) ||
+            null)
+          : null;
+      const objectName =
+        chatObjectId === HEADER_OBJECT
+          ? objects.find((o) => String(o.objectId) === String(selectedObject))?.objectName || ""
+          : objects.find((o) => String(o.objectId) === String(chatObjectId))?.objectName || "";
+
+      if (resolvedObjectId != null && String(resolvedObjectId).trim() !== "") {
+        dispatch(setSelectedObject(String(resolvedObjectId)));
+        if (objectName) dispatch(setSelectedObjectName(objectName));
+        localStorage.setItem("selectedObject", String(resolvedObjectId));
+        if (objectName) localStorage.setItem("selectedObjectName", objectName);
+      }
+
+      saveGlobalChatInsightNav({
+        route,
+        objectId: resolvedObjectId,
+        objectName,
+        kpis: selectedKpis.map((x) => x.title).filter(Boolean),
+      });
+      setOpen(false);
+      navigate(route, matchedJobRow ? { state: matchedJobRow } : undefined);
+    },
+    [
+      insightTargetRoute,
+      dataModule,
+      reportJobName,
+      filteredJobRows,
+      jobRows,
+      chatObjectId,
+      objects,
+      selectedObject,
+      resolvedObjectId,
+      dispatch,
+      navigate,
+    ],
+  );
 
   const handleSend = async () => {
     const question = chatInput.trim();
@@ -365,6 +477,8 @@ const GlobalChatbot = () => {
           content: res?.answer || "No response returned.",
           insight: res?.insight || null,
           charts: Array.isArray(res?.charts) ? res.charts : [],
+          kpisSnapshot: Array.isArray(res?.insight?.kpis) ? res.insight.kpis : [],
+          enableKpiPanel: true,
         },
       ]);
     } catch (err) {
@@ -405,6 +519,7 @@ const GlobalChatbot = () => {
     setMessages([]);
     setOnboardDone(false);
     setChatInput("");
+    setKpiTitleActions({});
     try {
       await clearGlobalChatSession(clearPayload);
     } catch (e) {
@@ -416,6 +531,7 @@ const GlobalChatbot = () => {
     setMessages([]);
     setOnboardDone(false);
     setChatInput("");
+    setKpiTitleActions({});
   };
 
   return (
@@ -442,62 +558,64 @@ const GlobalChatbot = () => {
           role="dialog"
           aria-label="Global assistant"
         >
-          <div className="px-3.5 py-3 border-b border-white/10 flex items-start justify-between gap-2 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 text-white shrink-0 shadow-sm">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
+          <div className="px-3.5 py-3 border-b border-white/10 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 text-white shrink-0 shadow-sm">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex items-center gap-2">
                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/15 ring-1 ring-white/25 shrink-0">
                   <Sparkles size={16} className="text-white" strokeWidth={2} aria-hidden />
                 </span>
                 <div className="text-sm font-semibold leading-tight tracking-tight">Assistant</div>
               </div>
-              <div className="text-[11px] text-violet-100/90 mt-1 leading-snug pl-10">
-                Grounded in your console scope and metrics
+              <div className="flex shrink-0 items-center gap-1 pt-0.5">
+                {onboardDone && (
+                  <>
+                    <button
+                      type="button"
+                      className="text-[10px] px-2.5 py-1 rounded-full border border-white/35 bg-white/10 text-white hover:bg-white/20 transition-colors"
+                      onClick={handleChangeModule}
+                      aria-label="Change context"
+                    >
+                      Context
+                    </button>
+                    <button
+                      type="button"
+                      className="text-[10px] px-2.5 py-1 rounded-full border border-red-200/80 bg-red-500/20 text-white hover:bg-red-500/30 transition-colors"
+                      onClick={handleResetConversation}
+                      aria-label="Reset conversation"
+                    >
+                      Reset
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="p-1 rounded-lg text-white/90 hover:bg-white/15 hover:text-white"
+                  onClick={() => setOpen(false)}
+                  aria-label="Close global chatbot"
+                >
+                  <X size={18} />
+                </button>
               </div>
-              {onboardDone && (
+            </div>
+            <div className="mt-2 text-[11px] text-violet-100/90 leading-snug">
+              Grounded in your console scope and metrics
+            </div>
+            {onboardDone && (
+              <div className="mt-2">
                 <span
-                  className="mt-2 ml-10 inline-flex max-w-[calc(100%-2.5rem)] items-center rounded-full border border-white/25 bg-black/10 px-2.5 py-0.5 text-[10px] font-medium leading-tight text-white"
+                  className="inline-flex w-fit max-w-full items-center rounded-full border border-white/25 bg-black/10 px-2.5 py-0.5 text-[10px] font-medium leading-tight text-white"
                   title={scopeSummary}
                 >
-                  <span className="truncate">{scopeChipLabel}</span>
+                  <span className="max-w-full truncate">{scopeChipLabel}</span>
                 </span>
-              )}
-            </div>
-            <div className="flex shrink-0 items-center gap-1 pt-0.5">
-              {onboardDone && (
-                <>
-                  <button
-                    type="button"
-                    className="text-[10px] px-2.5 py-1 rounded-full border border-white/35 bg-white/10 text-white hover:bg-white/20 transition-colors"
-                    onClick={handleChangeModule}
-                    aria-label="Change context"
-                  >
-                    Context
-                  </button>
-                  <button
-                    type="button"
-                    className="text-[10px] px-2.5 py-1 rounded-full border border-red-200/80 bg-red-500/20 text-white hover:bg-red-500/30 transition-colors"
-                    onClick={handleResetConversation}
-                    aria-label="Reset conversation"
-                  >
-                    Reset
-                  </button>
-                </>
-              )}
-              <button
-                type="button"
-                className="p-1 rounded-lg text-white/90 hover:bg-white/15 hover:text-white"
-                onClick={() => setOpen(false)}
-                aria-label="Close global chatbot"
-              >
-                <X size={18} />
-              </button>
-            </div>
+              </div>
+            )}
           </div>
 
           {!onboardDone ? (
             <div className="p-4 space-y-4 overflow-y-auto flex-1 min-h-0 bg-gradient-to-b from-slate-50/80 to-white">
               <Typography variant="body2" className="text-slate-700 !text-[13px] !leading-relaxed">
-                Choose <strong>object</strong>, <strong>console</strong>, <strong>area</strong>, and (when available){" "}
+                Choose <strong>object</strong>, <strong>console</strong>, <strong>module</strong>, and (when available){" "}
                 <strong>model</strong> so answers match where you’re working. Then chat in plain language.
               </Typography>
 
@@ -539,7 +657,7 @@ const GlobalChatbot = () => {
               </div>
 
               <div className="space-y-1.5">
-                <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">3 · Area</label>
+                <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">3 · Module</label>
                 <Select
                   size="small"
                   fullWidth
@@ -564,19 +682,15 @@ const GlobalChatbot = () => {
 
               {consoleType === "data" && dataModule === "reports" && (
                 <div className="space-y-1.5">
-                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Report job (optional)</label>
+                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">4 · Job name</label>
                   <Select
                     size="small"
                     fullWidth
-                    displayEmpty
                     value={reportJobName}
                     disabled={jobsLoading}
                     onChange={(e) => setReportJobName(e.target.value)}
                   >
-                    <MenuItem value="">
-                      <em>All jobs (list context)</em>
-                    </MenuItem>
-                    {jobRows.map((row) => {
+                    {filteredJobRows.map((row) => {
                       const name = row?.jobName ?? row?.name ?? String(row);
                       return (
                         <MenuItem key={name} value={name}>
@@ -591,7 +705,7 @@ const GlobalChatbot = () => {
 
               {consoleType === "data" && dataModule === "security" && (
                 <div className="space-y-1.5">
-                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Security data</label>
+                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">4 · Security module</label>
                   <Select
                     size="small"
                     fullWidth
@@ -671,10 +785,22 @@ const GlobalChatbot = () => {
                           : "bg-white border border-slate-200/90 text-slate-800 mr-5 shadow-sm"
                       }`}
                     >
-                      <div className="text-[10px] uppercase tracking-wider opacity-75 mb-1.5 font-semibold text-current">
-                        {m.role === "user" ? "You" : "Assistant"}
-                      </div>
-                      <div className="whitespace-pre-wrap break-words">{m.content}</div>
+                      {m.role === "user" ? (
+                        <>
+                          <div className="text-[10px] uppercase tracking-wider opacity-75 mb-1.5 font-semibold text-current">
+                            You
+                          </div>
+                          <div className="whitespace-pre-wrap break-words">{m.content}</div>
+                        </>
+                      ) : (
+                        <AiChatAssistantMessage
+                          message={m}
+                          kpiTitleActions={kpiTitleActions}
+                          onToggleKpiLine={handleToggleKpiLine}
+                          kpiPanelHelpText="Tick lines to remember KPI ideas for this chat session."
+                          onGoToInsightPanel={handleGoToInsightPanel}
+                        />
+                      )}
                     </div>
 
                     {m.role === "assistant" && (m.insight || (m.charts && m.charts.length > 0)) ? (
@@ -683,12 +809,6 @@ const GlobalChatbot = () => {
                           <Sparkles size={12} className="opacity-80" aria-hidden />
                           Insights & visuals
                         </div>
-
-                        <AiChatContextStrip
-                          charts={m.charts || []}
-                          kpisSnapshot={m.insight?.kpis || []}
-                          maxCharts={2}
-                        />
 
                         {!!(m.insight?.trends || []).length && (
                           <div className="rounded-lg border border-sky-100 bg-white/95 p-2 shadow-sm">

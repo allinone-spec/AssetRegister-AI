@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict, deque
 import hashlib
 import json
 import os
@@ -16,6 +16,7 @@ import pandas as pd
 import requests
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -33,7 +34,14 @@ from app.storage import AIStateStore, utc_day_key
 # Serialize OpenAI HTTP calls: parallel /analyze + chat completions share one key and trip RPM limits.
 _openai_completion_lock = threading.Lock()
 _openai_last_call_end_monotonic = 0.0
-OPENAI_MIN_INTERVAL_SEC = 2.0
+_openai_request_timestamps: deque[float] = deque()
+OPENAI_REQUEST_WINDOW_SEC = 60.0
+OPENAI_REQUESTS_PER_MINUTE = 3
+OPENAI_MIN_INTERVAL_SEC = 20.0
+OPENAI_429_BACKOFF_BUDGET_SEC = 90
+OPENAI_MAX_ATTEMPTS = 5
+OPENAI_MAX_OUTPUT_TOKENS = 400
+_ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 class Settings(BaseSettings):
@@ -61,12 +69,43 @@ class Settings(BaseSettings):
     # Comma-separated CORS origins for production (e.g. https://app.example.com)
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=str(_ENV_FILE_PATH), env_file_encoding="utf-8", extra="ignore")
+
+
+def _read_env_file_value(key: str) -> Optional[str]:
+    """Read a single KEY from ai-service/.env (without shell env precedence)."""
+    if not _ENV_FILE_PATH.exists():
+        return None
+    try:
+        for raw in _ENV_FILE_PATH.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except Exception:
+        return None
+    return None
 
 
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    # Force OpenAI config to follow ai-service/.env exactly, matching test_openai.py behavior.
+    file_openai_key = _read_env_file_value("OPENAI_API_KEY")
+    if file_openai_key:
+        settings.openai_api_key = file_openai_key
+    file_openai_model = _read_env_file_value("OPENAI_MODEL")
+    if file_openai_model:
+        settings.openai_model = file_openai_model
+    file_openai_model_2 = _read_env_file_value("OPENAI_MODEL_2")
+    if file_openai_model_2:
+        settings.openai_model_2 = file_openai_model_2
+    file_openai_base_url = _read_env_file_value("OPENAI_BASE_URL")
+    if file_openai_base_url:
+        settings.openai_base_url = file_openai_base_url
+    return settings
 
 
 @lru_cache()
@@ -277,13 +316,24 @@ def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
     return models
 
 
+def _default_model_id(settings: Settings) -> str:
+    """
+    Choose default model id when request payload does not include modelId.
+    Prefer OpenAI when configured, then fall back to first configured model.
+    """
+    models = _get_ai_models_list(settings)
+    if not models:
+        raise HTTPException(status_code=503, detail="No AI model is configured in .env.")
+    for item in models:
+        if str(item.get("provider") or "").strip().lower() == "openai":
+            return str(item["id"])
+    return str(models[0]["id"])
+
+
 def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
     """Resolve model_id to config dict (provider, endpoint, deployment, api_key, etc.)."""
     if not (model_id or "").strip():
-        models = _get_ai_models_list(settings)
-        if not models:
-            raise HTTPException(status_code=503, detail="No AI model is configured in .env.")
-        model_id = models[0]["id"]
+        model_id = _default_model_id(settings)
     else:
         model_id = model_id.strip()
 
@@ -314,7 +364,7 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
                 "api_key": settings.azure_openai_2_api_key,
             }
     elif slot == _AI_SLOT_OPENAI_PRIMARY:
-        if getattr(settings, "openai_model", None) and technical == settings.openai_model and settings.openai_api_key:
+        if getattr(settings, "openai_model", None) and settings.openai_api_key:
             return {
                 "provider": "openai",
                 "api_key": settings.openai_api_key,
@@ -322,7 +372,7 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
             }
     elif slot == _AI_SLOT_OPENAI_SECONDARY:
         m2 = getattr(settings, "openai_model_2", None)
-        if m2 and technical == m2 and settings.openai_api_key:
+        if m2 and settings.openai_api_key:
             return {
                 "provider": "openai",
                 "api_key": settings.openai_api_key,
@@ -382,16 +432,58 @@ def _azure_chat_url(settings: Settings, model_id: Optional[str] = None) -> str:
 
 
 def _extract_retry_after_seconds(resp: requests.Response) -> Optional[int]:
-    retry_after = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    retry_after = _extract_retry_after_seconds_from_headers(resp.headers)
+    if retry_after is not None:
+        return retry_after
+    match = re.search(r"retry after\s+(\d+)\s+seconds", resp.text or "", re.IGNORECASE)
+    if match:
+        return max(1, int(match.group(1)))
+    return None
+
+
+def _extract_retry_after_seconds_from_headers(headers: Any) -> Optional[int]:
+    if not headers:
+        return None
+    retry_after = headers.get("Retry-After") or headers.get("retry-after")
     if retry_after:
         try:
             return max(1, int(float(retry_after)))
         except Exception:
             pass
-    match = re.search(r"retry after\s+(\d+)\s+seconds", resp.text or "", re.IGNORECASE)
+    return None
+
+
+def _extract_retry_after_seconds_from_openai_exc(exc: Exception) -> Optional[int]:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) if response is not None else None
+    retry_after = _extract_retry_after_seconds_from_headers(headers)
+    if retry_after is not None:
+        return retry_after
+    msg = str(exc or "")
+    match = re.search(r"retry after\s+(\d+)\s*(seconds|s)\b", msg, re.IGNORECASE)
     if match:
         return max(1, int(match.group(1)))
     return None
+
+
+def _is_openai_insufficient_quota_error(exc: Exception) -> bool:
+    """
+    Detect OpenAI quota/billing 429s (insufficient_quota), which are not transient
+    rate limits and should not be retried with backoff.
+    """
+    body = getattr(exc, "body", None)
+    try:
+        if isinstance(body, dict):
+            err = body.get("error") if isinstance(body.get("error"), dict) else body
+            code = str(err.get("code") or "").strip().lower() if isinstance(err, dict) else ""
+            err_type = str(err.get("type") or "").strip().lower() if isinstance(err, dict) else ""
+            if code == "insufficient_quota" or err_type == "insufficient_quota":
+                return True
+    except Exception:
+        pass
+
+    msg = str(exc or "").lower()
+    return "insufficient_quota" in msg
 
 
 def _build_backend_headers(settings: Settings, request: Optional[Request] = None) -> Dict[str, str]:
@@ -715,10 +807,7 @@ def _session_dataset_key(payload: AnalyzeRequest | ChatRequest | ChatSessionRequ
 def _model_id_or_default(payload_model: Optional[str], settings: Settings) -> str:
     model_id = (payload_model or "").strip()
     if not model_id:
-        models = _get_ai_models_list(settings)
-        if not models:
-            raise HTTPException(status_code=503, detail="No AI model is configured in .env.")
-        return models[0]["id"]
+        return _default_model_id(settings)
     _get_model_config(settings, model_id)
     return model_id
 
@@ -1334,6 +1423,7 @@ def _build_admin_console_overview_response(
     request: Request,
     feedback_list: List[Dict[str, Any]],
     chat_messages: List[Dict[str, str]],
+    persistent_user_memory_text: str = "",
 ) -> Dict[str, Any]:
     headers = _build_backend_headers(settings, request)
     status_rows = _fetch_admin_console_module_rows(settings, "import-status", headers, payload)
@@ -1351,7 +1441,7 @@ def _build_admin_console_overview_response(
     metrics["objectScope"] = obj or "ALL"
 
     custom = (payload.customPrompt or "").strip()
-    fb_context = _build_preprocessing_context(custom, feedback_list, chat_messages)
+    fb_context = _build_preprocessing_context(custom, feedback_list, chat_messages, persistent_user_memory_text)
     highlights = _llm_admin_console_highlights(settings, model_id, metrics, fb_context)
 
     total_insights: List[Dict[str, Any]] = []
@@ -1544,6 +1634,7 @@ def _build_data_console_home_response(
     request: Request,
     feedback_list: List[Dict[str, Any]],
     chat_messages: List[Dict[str, str]],
+    persistent_user_memory_text: str = "",
 ) -> Dict[str, Any]:
     headers = _build_backend_headers(settings, request)
     dd = _dashboard_data_dict(payload)
@@ -1635,7 +1726,7 @@ def _build_data_console_home_response(
     }
 
     custom = (payload.customPrompt or "").strip()
-    fb_context = _build_preprocessing_context(custom, feedback_list, chat_messages)
+    fb_context = _build_preprocessing_context(custom, feedback_list, chat_messages, persistent_user_memory_text)
     system = _resolve_app_prompt(KEY_DATA_CONSOLE_INSIGHTS)
     user = "METRICS:\n" + json.dumps(metrics, indent=2, default=str)
     if fb_context.strip():
@@ -2281,15 +2372,93 @@ def _openai_chat_completions_url(settings: Settings) -> str:
     return f"{base}/chat/completions"
 
 
+@lru_cache()
+def _get_openai_sdk_client(api_key: str, base_url: str) -> OpenAI:
+    kwargs: Dict[str, Any] = {"api_key": api_key, "max_retries": 0}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
+
+
+def _wait_for_openai_request_slot() -> None:
+    """
+    Enforce OpenAI account request pacing.
+    Current account limit provided by user: 3 RPM.
+    """
+    global _openai_last_call_end_monotonic
+    while True:
+        now = time.monotonic()
+        while _openai_request_timestamps and now - _openai_request_timestamps[0] >= OPENAI_REQUEST_WINDOW_SEC:
+            _openai_request_timestamps.popleft()
+
+        wait_candidates: List[float] = []
+
+        gap = OPENAI_MIN_INTERVAL_SEC - (now - _openai_last_call_end_monotonic)
+        if _openai_last_call_end_monotonic > 0.0 and gap > 0:
+            wait_candidates.append(gap)
+
+        if len(_openai_request_timestamps) >= OPENAI_REQUESTS_PER_MINUTE:
+            wait_candidates.append(OPENAI_REQUEST_WINDOW_SEC - (now - _openai_request_timestamps[0]))
+
+        if not wait_candidates:
+            _openai_request_timestamps.append(now)
+            return
+
+        time.sleep(max(0.25, min(wait_candidates)))
+
+
+def _openai_assistant_text_from_message(message: Any) -> str:
+    """Normalize assistant output (same idea as ai-service/test.py reading choices[0].message.content)."""
+    if message is None:
+        return ""
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text" and part.get("text"):
+                    parts.append(str(part["text"]))
+            else:
+                t = getattr(part, "text", None)
+                if t:
+                    parts.append(str(t))
+        return "".join(parts)
+    if content is not None:
+        return str(content)
+    refusal = getattr(message, "refusal", None)
+    if refusal:
+        return str(refusal)
+    return ""
+
+
+def _openai_assistant_text_from_completion(res: Any) -> str:
+    if not res or not getattr(res, "choices", None):
+        return ""
+    return _openai_assistant_text_from_message(getattr(res.choices[0], "message", None))
+
+
 def _llm_chat_payload_for_openai(model: str, base_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Some OpenAI models use max_completion_tokens and omit temperature."""
+    """Newer OpenAI models use max_completion_tokens and reject temperature (see test.py / gpt-5-mini)."""
     out = dict(base_payload)
     m = (model or "").lower()
-    if m.startswith("o1") or m.startswith("o3") or m.startswith("gpt-5"):
+    if m.startswith(("o1", "o3", "o4")) or "gpt-5" in m:
         out.pop("temperature", None)
         mt = out.pop("max_tokens", None)
         if mt is not None:
             out["max_completion_tokens"] = mt
+    # Keep OpenAI spend bounded for larger /analyze prompts.
+    if "max_completion_tokens" in out:
+        try:
+            out["max_completion_tokens"] = max(64, min(int(out["max_completion_tokens"]), OPENAI_MAX_OUTPUT_TOKENS))
+        except Exception:
+            out["max_completion_tokens"] = OPENAI_MAX_OUTPUT_TOKENS
+    elif "max_tokens" in out:
+        try:
+            out["max_tokens"] = max(64, min(int(out["max_tokens"]), OPENAI_MAX_OUTPUT_TOKENS))
+        except Exception:
+            out["max_tokens"] = OPENAI_MAX_OUTPUT_TOKENS
     return out
 
 
@@ -2299,8 +2468,6 @@ def _llm_chat(
     messages: List[Dict[str, str]],
     max_tokens: int = 2000,
     json_mode: bool = False,
-    *,
-    _skip_openai_429_azure_fallback: bool = False,
 ) -> str:
     global _openai_last_call_end_monotonic
     cfg = _get_model_config(settings, model_id)
@@ -2322,90 +2489,104 @@ def _llm_chat(
         if not api_key:
             raise HTTPException(status_code=503, detail="OpenAI API key is not configured.")
         model = cfg.get("model") or "gpt-4o-mini"
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-        url = _openai_chat_completions_url(settings)
         provider_label = "OpenAI"
         req_payload = _llm_chat_payload_for_openai(model, payload)
         req_payload["model"] = model
+        openai_client = _get_openai_sdk_client(api_key, getattr(settings, "openai_base_url", None) or "")
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
     is_openai = provider == "openai"
-    # OpenAI: cap 429 backoff so /analyze returns (success or error) instead of hanging the UI for 10+ minutes.
-    max_attempts = 6 if is_openai else 2
-    openai_429_backoff_budget = 100
+    # Keep OpenAI requests on OpenAI: serialize, slow down a bit, and retry 429s with bounded backoff.
+    max_attempts = OPENAI_MAX_ATTEMPTS if is_openai else 2
+    openai_429_backoff_budget = OPENAI_429_BACKOFF_BUDGET_SEC
     http_timeout = 150 if is_openai else 180
 
     def _post_chat_completions() -> str:
         backoff_used = 0
         for attempt in range(max_attempts):
+            if is_openai:
+                _wait_for_openai_request_slot()
             try:
-                resp = requests.post(url, headers=headers, json=req_payload, timeout=http_timeout)
-            except requests.RequestException as exc:
-                raise HTTPException(status_code=502, detail=f"Failed to reach {provider_label}: {exc}") from exc
-            if resp.ok:
-                data = resp.json()
-                return (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
-            if resp.status_code == 429:
-                if attempt < max_attempts - 1:
-                    if is_openai:
-                        budget_left = openai_429_backoff_budget - backoff_used
-                        if budget_left >= 2:
-                            ra = _extract_retry_after_seconds(resp)
-                            if ra is None:
-                                ra = 4 + attempt * 6
-                            wait_s = min(max(int(ra), 2), 24, budget_left)
+                if is_openai:
+                    try:
+                        res = openai_client.with_options(timeout=http_timeout).chat.completions.create(**req_payload)
+                        text = _openai_assistant_text_from_completion(res)
+                        # test.py: retry once if body is empty (avoids JSON-repair spam and bogus failures).
+                        if json_mode and not (text or "").strip():
+                            _openai_last_call_end_monotonic = time.monotonic()
+                            _wait_for_openai_request_slot()
+                            res = openai_client.with_options(timeout=http_timeout).chat.completions.create(**req_payload)
+                            text = _openai_assistant_text_from_completion(res)
+                        return text
+                    except RateLimitError as exc:
+                        if _is_openai_insufficient_quota_error(exc):
+                            raise HTTPException(
+                                status_code=503,
+                                detail=(
+                                    "OpenAI API key has insufficient quota/billing. "
+                                    "Update OPENAI_API_KEY with a funded key and retry."
+                                ),
+                            ) from exc
+                        retry_after = _extract_retry_after_seconds_from_openai_exc(exc) or 15
+                        if attempt < max_attempts - 1:
+                            budget_left = openai_429_backoff_budget - backoff_used
+                            if budget_left >= 2:
+                                wait_s = min(max(int(retry_after), 4), 30, budget_left)
+                                try:
+                                    print(
+                                        f"[AI] OpenAI rate-limited; retrying in {wait_s}s "
+                                        f"(attempt {attempt + 2}/{max_attempts}).",
+                                        flush=True,
+                                    )
+                                except Exception:
+                                    pass
+                                time.sleep(wait_s)
+                                backoff_used += wait_s
+                                continue
+                        raise HTTPException(
+                            status_code=429,
+                            detail=f"{provider_label} is temporarily rate-limited. Wait about {retry_after} seconds.",
+                        ) from exc
+                    except APIConnectionError as exc:
+                        if attempt < max_attempts - 1:
+                            wait_s = min(3 + attempt * 4, 18)
                             time.sleep(wait_s)
-                            backoff_used += wait_s
+                            continue
+                        raise HTTPException(status_code=502, detail=f"Failed to reach {provider_label}: {exc}") from exc
+                    except APIStatusError as exc:
+                        detail = str(exc)
+                        raise HTTPException(status_code=502, detail=f"{provider_label} returned an API error: {detail[:500]}") from exc
+                try:
+                    resp = requests.post(url, headers=headers, json=req_payload, timeout=http_timeout)
+                except requests.RequestException as exc:
+                    raise HTTPException(status_code=502, detail=f"Failed to reach {provider_label}: {exc}") from exc
+                if resp.ok:
+                    data = resp.json()
+                    return (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
+                if resp.status_code == 429:
+                    if attempt < max_attempts - 1:
+                        retry_after = _extract_retry_after_seconds(resp) or 60
+                        if attempt == 0 and retry_after <= 10:
+                            time.sleep(retry_after)
                             continue
                     retry_after = _extract_retry_after_seconds(resp) or 60
-                    if attempt == 0 and retry_after <= 10:
-                        time.sleep(retry_after)
-                        continue
-                retry_after = _extract_retry_after_seconds(resp) or 60
+                    raise HTTPException(
+                        status_code=429,
+                        detail=f"{provider_label} is temporarily rate-limited. Wait about {retry_after} seconds.",
+                    )
                 raise HTTPException(
-                    status_code=429,
-                    detail=f"{provider_label} is temporarily rate-limited. Wait about {retry_after} seconds.",
+                    status_code=502,
+                    detail=f"{provider_label} returned {resp.status_code}: {resp.text[:500]}",
                 )
-            raise HTTPException(
-                status_code=502,
-                detail=f"{provider_label} returned {resp.status_code}: {resp.text[:500]}",
-            )
+            finally:
+                if is_openai:
+                    _openai_last_call_end_monotonic = time.monotonic()
         raise HTTPException(status_code=502, detail=f"{provider_label} request failed after {max_attempts} attempts.")
 
     if is_openai:
-        try:
-            with _openai_completion_lock:
-                now = time.monotonic()
-                gap = OPENAI_MIN_INTERVAL_SEC - (now - _openai_last_call_end_monotonic)
-                if _openai_last_call_end_monotonic > 0.0 and gap > 0:
-                    time.sleep(gap)
-                try:
-                    return _post_chat_completions()
-                finally:
-                    _openai_last_call_end_monotonic = time.monotonic()
-        except HTTPException as exc:
-            if exc.status_code != 429 or _skip_openai_429_azure_fallback:
-                raise
-            azure_ids = [
-                m["id"]
-                for m in _get_ai_models_list(settings)
-                if m.get("provider") == "azure_openai"
-            ]
-            if not azure_ids:
-                raise
-            try:
-                print("[AI] OpenAI rate-limited; using Azure OpenAI for this completion.", flush=True)
-            except Exception:
-                pass
-            return _llm_chat(
-                settings,
-                azure_ids[0],
-                messages,
-                max_tokens,
-                json_mode,
-                _skip_openai_429_azure_fallback=True,
-            )
+        with _openai_completion_lock:
+            return _post_chat_completions()
 
     return _post_chat_completions()
 
@@ -2451,6 +2632,124 @@ def _format_session_feedback_for_prompt(feedback: List[Dict[str, Any]]) -> str:
             f"comment={f.get('comment') or '—'}"
         )
     return "\n".join(lines)
+
+
+_USER_MEMORY_STOPWORDS = {
+    "about", "after", "again", "also", "analysis", "analytics", "answer", "answers", "asked", "asking",
+    "based", "being", "between", "build", "change", "changes", "chat", "console", "could", "data",
+    "dataset", "details", "give", "global", "have", "help", "helpful", "improve", "insight", "insights",
+    "into", "just", "more", "need", "next", "page", "please", "question", "questions", "report",
+    "show", "showing", "summary", "table", "tell", "that", "them", "these", "they", "this", "those",
+    "today", "want", "what", "when", "where", "which", "with", "would", "your",
+}
+
+
+def _build_persistent_user_learning_context(
+    store: AIStateStore,
+    org_id: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    recent_feedback = store.list_recent_user_feedback(org_id, user_id, limit=80)
+    recent_chat = store.list_recent_user_chat_messages(org_id, user_id, limit_sessions=24, limit_messages=120)
+
+    user_questions: List[str] = []
+    page_counter: Counter[str] = Counter()
+    token_counter: Counter[str] = Counter()
+
+    for msg in recent_chat:
+        role = str(msg.get("role") or "").strip().lower()
+        content = str(msg.get("content") or "").strip()
+        if role != "user" or not content:
+            continue
+        user_questions.append(content[:260])
+        page_id = str(msg.get("pageId") or "").strip()
+        if page_id:
+            page_counter[page_id] += 1
+        for tok in re.findall(r"[a-z0-9_]{4,}", content.lower()):
+            if tok in _USER_MEMORY_STOPWORDS or tok.isdigit():
+                continue
+            token_counter[tok] += 1
+
+    helpful = []
+    improve = []
+    hidden = []
+    for f in recent_feedback:
+        ft = str(f.get("feedbackType") or "").strip().lower()
+        comment = str(f.get("comment") or "").strip()
+        row = {
+            "type": ft or ("helpful" if f.get("useful") is True else "unknown"),
+            "insightType": f.get("insightType"),
+            "comment": comment or None,
+            "pageId": f.get("_pageId"),
+        }
+        if row["type"] == "helpful":
+            helpful.append(row)
+        elif row["type"] == "not_helpful" and not _comment_implies_hide_insight(comment):
+            improve.append(row)
+        elif row["type"] == "irrelevant" or (
+            row["type"] == "not_helpful" and _comment_implies_hide_insight(comment)
+        ):
+            hidden.append(row)
+
+    top_topics = [tok for tok, _ in token_counter.most_common(10)]
+    top_pages = [page for page, _ in page_counter.most_common(8)]
+    recent_questions_trimmed = []
+    seen_questions = set()
+    for q in reversed(user_questions):
+        qn = q.lower()
+        if qn in seen_questions:
+            continue
+        seen_questions.add(qn)
+        recent_questions_trimmed.append(q)
+        if len(recent_questions_trimmed) >= 12:
+            break
+    recent_questions_trimmed.reverse()
+
+    lines: List[str] = []
+    if top_topics:
+        lines.append("Recurring user topics: " + ", ".join(top_topics))
+    if top_pages:
+        lines.append("Frequently used scopes/pages: " + ", ".join(top_pages))
+    if helpful:
+        lines.append(
+            "What the user tends to value: "
+            + "; ".join(
+                f"{str(x.get('insightType') or 'insight')} on {str(x.get('pageId') or 'unknown page')}"
+                + (f" ({x.get('comment')})" if x.get("comment") else "")
+                for x in helpful[:8]
+            )
+        )
+    if improve:
+        lines.append(
+            "What the user wants improved instead of dropped: "
+            + "; ".join(
+                (x.get("comment") or f"{x.get('insightType') or 'insight'} on {x.get('pageId') or 'unknown page'}")
+                for x in improve[:8]
+            )
+        )
+    if hidden:
+        lines.append(
+            "What the user tends to hide or avoid: "
+            + "; ".join(
+                (x.get("comment") or f"{x.get('insightType') or 'insight'} on {x.get('pageId') or 'unknown page'}")
+                for x in hidden[:8]
+            )
+        )
+    if recent_questions_trimmed:
+        lines.append(
+            "Recent user questions across sessions: "
+            + " | ".join(recent_questions_trimmed[-8:])
+        )
+
+    return {
+        "topTopics": top_topics,
+        "topPages": top_pages,
+        "recentQuestions": recent_questions_trimmed,
+        "helpful": helpful[:12],
+        "improve": improve[:12],
+        "hidden": hidden[:12],
+        "text": "\n".join(lines) if lines else "",
+    }
 
 
 def _build_compact_data_summary_for_chat(analysis: Dict[str, Any]) -> str:
@@ -2514,15 +2813,29 @@ def _chat_system_prompt(
     charts: List[Dict[str, Any]],
     analysis_context: Dict[str, Any],
     feedback: List[Dict[str, Any]],
+    persistent_user_memory_text: str = "",
+    *,
+    global_mode: bool = False,
 ) -> str:
     compact = (analysis_context or {}).get("compactSummaryText") or ""
     ctx_for_dump = {k: v for k, v in (analysis_context or {}).items() if k != "compactSummaryText"}
     fb_text = _format_session_feedback_for_prompt(feedback)
-    org_prefix = _resolve_app_prompt(KEY_PAGE_CHAT_PREFIX)
+    org_prefix = _resolve_app_prompt(KEY_GLOBAL_CHAT_PREFIX if global_mode else KEY_PAGE_CHAT_PREFIX)
+    evidence_json = {
+        "kpis": (ctx_for_dump.get("kpis") or [])[:10],
+        "trends": (ctx_for_dump.get("trends") or [])[:8],
+        "risks": (ctx_for_dump.get("risks") or [])[:8],
+        "recommendations": (ctx_for_dump.get("recommendations") or [])[:8],
+        "columnInsightsSample": (ctx_for_dump.get("columnInsightsSample") or [])[:8],
+        "rowInsightsSample": (ctx_for_dump.get("rowInsightsSample") or [])[:8],
+        "importTracing": ctx_for_dump.get("importTracing") or {},
+        "registerTracing": ctx_for_dump.get("registerTracing") or {},
+        "analysisMeta": ctx_for_dump.get("analysisMeta") or {},
+    }
     core = (
         "You are a senior Data Analyst and Data Quality Expert.\n"
         "Use the cached daily analysis as the authoritative understanding of today's dataset.\n"
-        "Continue the conversation consistently across this user's same-day session.\n\n"
+        "Continue the conversation consistently across this user's session and longer-term user-specific learning.\n\n"
         "SESSION FEEDBACK (remember for this user+page+dataset until they clear the session):\n"
         "- HELPFUL: user wants more in this vein — prefer deeper, advanced follow-ups tied to the same KPIs/themes.\n"
         "- NOT_HELPFUL: user wants a similar insight but revised — their comment is the spec; do not dismiss the topic.\n"
@@ -2530,17 +2843,23 @@ def _chat_system_prompt(
         "DATA GROUNDING (mandatory):\n"
         "- STRUCTURED DATA SUMMARY + analysisSummary + expanded context are derived from today's dataset.\n"
         "- Quote KPI names, values, maturity, tracing counts, and risks from these blocks only.\n"
-        "- If the answer is not supported by the summary, say the snapshot does not contain that detail—do not invent.\n\n"
-        "Answer in plain text, not JSON. Do not use markdown tables.\n"
+        "- If the answer is not supported by the summary, say the snapshot does not contain that detail—do not invent.\n"
+        "- Prefer 2-4 concrete data points when the question is analytical or comparative.\n\n"
+        "STYLE:\n"
+        "- Answer in plain text, not JSON. Do not use markdown tables.\n"
+        "- Sound natural and conversational, like a strong modern assistant, but stay tightly grounded in the data.\n"
+        "- Be direct first, then explain why it matters, then give a next step when useful.\n"
         "Match your answer to the question:\n"
         "- Broad questions: Summary, Findings, Recommended actions (short bullets).\n"
         "- Narrow factual questions: direct concise answers citing KPIs/insights above.\n"
-        "- Casual chat: brief and still tied to dataset when relevant.\n\n"
+        "- Casual chat: brief and still tied to dataset when relevant.\n"
+        "- If the user asks for insights, summary, visuals, trends, KPI, risks, or recommendations, answer conversationally but assume structured insight output may also be rendered alongside your answer.\n\n"
         f"STRUCTURED DATA SUMMARY (primary grounding — cite from here):\n{compact or '(empty)'}\n\n"
         f"analysisSummary JSON:\n{json.dumps(analysis_summary, indent=2, default=str)}\n\n"
         f"Dashboard charts:\n{json.dumps(charts, indent=2, default=str)}\n\n"
-        f"Expanded analysis context:\n{json.dumps(ctx_for_dump, indent=2, default=str)}\n\n"
-        f"Session feedback log (chronological):\n{fb_text}"
+        f"Expanded analysis context (curated evidence):\n{json.dumps(evidence_json, indent=2, default=str)}\n\n"
+        f"Session feedback log (chronological):\n{fb_text}\n\n"
+        f"Persistent user learning across sessions (same user only):\n{persistent_user_memory_text or '(none yet)'}"
     )
     if org_prefix:
         return org_prefix.rstrip() + "\n\n" + core.lstrip()
@@ -2667,6 +2986,9 @@ def _build_chat_analysis_context(analysis: Dict[str, Any]) -> Dict[str, Any]:
 def _build_chat_turn_prompt(
     latest_user_question: str,
     analysis_context: Dict[str, Any],
+    persistent_user_memory_text: str = "",
+    *,
+    global_mode: bool = False,
 ) -> str:
     """
     Build a focused per-turn instruction so chat replies stay holistic AND grounded
@@ -2709,6 +3031,8 @@ def _build_chat_turn_prompt(
     return (
         "CURRENT USER QUESTION:\n"
         f"{q}\n\n"
+        "RELEVANT USER MEMORY:\n"
+        f"{persistent_user_memory_text or '(none yet)'}\n\n"
         "MOST RELEVANT DATA CONTEXT FOR THIS QUESTION:\n"
         f"{json.dumps(top_relevant[:10], indent=2, default=str)}\n\n"
         "ANSWER QUALITY RULES:\n"
@@ -2716,7 +3040,12 @@ def _build_chat_turn_prompt(
         "- Explain: what it means, why it matters, and what to do next.\n"
         "- Cite concrete data points when available (KPI names/values, trends, statuses, counts).\n"
         "- If exact data is unavailable for a part of the question, state that clearly and use closest available evidence.\n"
-        "- Avoid generic textbook advice that is not tied to this dataset."
+        "- Avoid generic textbook advice that is not tied to this dataset.\n"
+        + (
+            "- Keep the tone naturally conversational and assistant-like, not robotic.\n"
+            if global_mode
+            else ""
+        )
     )
 
 
@@ -2892,6 +3221,34 @@ def _question_requests_insight(question: str) -> bool:
     )
 
 
+def _question_requests_visuals(question: str) -> bool:
+    q = (question or "").lower()
+    return bool(
+        re.search(
+            r"\b(chart|charts|graph|graphs|visual|visuals|visualize|dashboard|trend|trends|plot|plots)\b",
+            q,
+        )
+    )
+
+
+def _build_chat_companion_payload(analysis: Dict[str, Any], question: str) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    include_insight = _question_requests_insight(question)
+    include_visuals = include_insight or _question_requests_visuals(question)
+    insight = None
+    if include_insight:
+        insight = {
+            "kpis": (analysis.get("kpis") or [])[:8],
+            "totalInsights": (analysis.get("totalInsights") or [])[:6],
+            "trends": (analysis.get("trends") or [])[:6],
+            "risks": (analysis.get("risks") or [])[:6],
+            "recommendations": (analysis.get("recommendations") or [])[:6],
+            "columnInsights": (analysis.get("columnInsights") or [])[:6],
+            "rowInsights": (analysis.get("rowInsights") or [])[:6],
+        }
+    charts_out = (analysis.get("charts") or [])[:3] if include_visuals else []
+    return insight, charts_out
+
+
 def _build_analysis_user_prompt(
     summary: Dict[str, Any],
     anomaly_chunk: List[Dict[str, Any]],
@@ -3017,11 +3374,17 @@ def _build_preprocessing_context(
     custom_prompt: Optional[str],
     feedback_list: List[Dict[str, Any]],
     chat_messages: List[Dict[str, str]],
+    persistent_user_memory_text: str = "",
 ) -> str:
     """Build a single context string from custom prompt, feedback, and chat for preprocessing and prompts."""
     parts: List[str] = []
     if (custom_prompt or "").strip():
         parts.append(f"USER CUSTOM PROMPT / FOCUS:\n{(custom_prompt or '').strip()}")
+    if persistent_user_memory_text.strip():
+        parts.append(
+            "PERSISTENT USER LEARNING ACROSS SESSIONS (same user only — use this to tailor future insights and emphasis):\n"
+            + persistent_user_memory_text.strip()
+        )
     if feedback_list:
         helpful = [
             f
@@ -3112,9 +3475,10 @@ def _build_feedback_instructions(
     custom_prompt: Optional[str],
     feedback_list: List[Dict[str, Any]],
     chat_messages: List[Dict[str, str]],
+    persistent_user_memory_text: str = "",
 ) -> str:
     """Build prompt instructions from custom prompt, user feedback, and recent chat so the model can tailor insights."""
-    context = _build_preprocessing_context(custom_prompt, feedback_list, chat_messages)
+    context = _build_preprocessing_context(custom_prompt, feedback_list, chat_messages, persistent_user_memory_text)
     if not context.strip():
         return ""
     return (
@@ -4462,6 +4826,7 @@ def _analysis_from_rows(
     register_tracing_context: Optional[str] = None,
     analysis_profile: Optional[str] = None,
     authoritative_row_total: Optional[int] = None,
+    persistent_user_memory_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     df = _to_df(rows)
     df_cols = list(df.columns)
@@ -4470,7 +4835,7 @@ def _analysis_from_rows(
         focus_columns = [c for c in focus_columns_override if str(c) in df_cols]
     else:
         preprocessing_context = _build_preprocessing_context(
-            custom_prompt, feedback_list or [], chat_messages or []
+            custom_prompt, feedback_list or [], chat_messages or [], persistent_user_memory_text or ""
         )
         focus_columns = _get_focus_columns_heuristic(preprocessing_context, df_cols)
     anomalies = _detect_anomalies(df)
@@ -4478,8 +4843,8 @@ def _analysis_from_rows(
     analysis_llm_provider = _analysis_llm_cfg.get("provider", "azure_openai")
     # Token guardrail: for large datasets, anomalies can be huge and blow the context window.
     # We still compute charts/summary from full anomalies, but only send a capped subset to the LLM.
-    # OpenAI developer/free tiers: strict RPM/TPM — keep LLM payload small; we collapse to one chunk below.
-    max_anomalies_for_llm = 80 if analysis_llm_provider == "openai" else 250
+    # Use the same cap/chunking strategy across providers so insight quality does not vary by vendor path.
+    max_anomalies_for_llm = 120
     anomalies_for_llm: List[Dict[str, Any]] = anomalies
     if len(anomalies) > max_anomalies_for_llm:
         by_issue: Dict[str, List[Dict[str, Any]]] = {}
@@ -4499,15 +4864,10 @@ def _analysis_from_rows(
     summary["row_health_summary"] = _build_row_health_summary(df, anomalies)
     base = _base_analysis(df, anomalies, charts)
     feedback_instructions = _build_feedback_instructions(
-        custom_prompt, feedback_list or [], chat_messages or []
+        custom_prompt, feedback_list or [], chat_messages or [], persistent_user_memory_text or ""
     )
     llm_chunks: List[Dict[str, Any]] = []
-    if analysis_llm_provider == "openai":
-        # One completion for the tabular insight pass (plus at most one JSON-repair call). Multi-chunk
-        # analyze was exhausting OpenAI RPM on low tiers even with short sleeps between chunks.
-        chunk_size = max(len(anomalies_for_llm), 1)
-    else:
-        chunk_size = 50 if len(json.dumps(summary)) < 25000 else 20
+    chunk_size = 50 if len(json.dumps(summary)) < 25000 else 20
     chunks = _chunk_list(anomalies_for_llm, chunk_size)
     for index, chunk in enumerate(chunks, start=1):
         messages = [
@@ -4679,6 +5039,8 @@ def _ensure_daily_analysis(
     chat_messages = store.get_chat_messages(
         day_key, payload.orgId, payload.userId, payload.pageId, session_key
     )
+    persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
+    persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
     cached = store.get_cached_analysis(day_key, analysis_dataset_key)
     if cached:
         _strip_redundant_total_rows_kpi(cached)
@@ -4761,14 +5123,14 @@ def _ensure_daily_analysis(
                 authoritative_register_total = None
     if dbg_page_id == "admin-console/overview":
         response = _build_admin_console_overview_response(
-            settings, model_id, payload, request, feedback_list, chat_messages
+            settings, model_id, payload, request, feedback_list, chat_messages, persistent_user_memory_text
         )
         _filter_irrelevant_insights(response, feedback_list)
         store.save_cached_analysis(day_key, analysis_dataset_key, response, response.get("analysisSummary"))
         return response
     if dbg_page_id == "data-console/overview":
         response = _build_data_console_home_response(
-            settings, model_id, payload, request, feedback_list, chat_messages
+            settings, model_id, payload, request, feedback_list, chat_messages, persistent_user_memory_text
         )
         _filter_irrelevant_insights(response, feedback_list)
         store.save_cached_analysis(day_key, analysis_dataset_key, response, response.get("analysisSummary"))
@@ -4828,6 +5190,7 @@ def _ensure_daily_analysis(
         register_tracing_context=register_tracing_context or None,
         analysis_profile=payload.pageId,
         authoritative_row_total=authoritative_register_total,
+        persistent_user_memory_text=persistent_user_memory_text,
     )
     if _is_report_job_detail_page_id(payload.pageId):
         if not importTracingObj:
@@ -4894,6 +5257,8 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
     model_id = _model_id_or_default(payload.modelId, settings)
     day_key = utc_day_key()
     session_key = _session_dataset_key(payload)
+    persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
+    persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
     analysis_payload = AnalyzeRequest(
         orgId=payload.orgId,
         userId=payload.userId,
@@ -4922,18 +5287,25 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
                 analysis.get("charts", []),
                 analysis_context,
                 feedback,
+                persistent_user_memory_text,
             ),
         },
         {
             "role": "system",
-            "content": _build_chat_turn_prompt(latest_user_question, analysis_context),
+            "content": _build_chat_turn_prompt(latest_user_question, analysis_context, persistent_user_memory_text),
         },
     ]
     messages.extend(combined_history)
     answer = _llm_chat(settings, model_id, messages, max_tokens=1600)
     stored_history = (combined_history + [{"role": "assistant", "content": answer}])[-24:]
     store.save_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key, stored_history, analysis_summary)
-    return {"answer": answer, "charts": analysis.get("charts", []), "analysisMeta": analysis.get("analysisMeta", {})}
+    insight, charts_out = _build_chat_companion_payload(analysis, latest_user_question)
+    return {
+        "answer": answer,
+        "insight": insight,
+        "charts": charts_out,
+        "analysisMeta": analysis.get("analysisMeta", {}),
+    }
 
 
 @app.post("/api/ai/global-chat")
@@ -4941,6 +5313,8 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
     store = get_store()
     model_id = _model_id_or_default(payload.modelId, settings)
     day_key = utc_day_key()
+    persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
+    persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
 
     resolved_page_id, resolved_category, resolved_filters = _resolve_global_analysis_scope(payload)
     analysis_payload = AnalyzeRequest(
@@ -4986,11 +5360,18 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
                 analysis.get("charts", []),
                 analysis_context,
                 feedback,
+                persistent_user_memory_text,
+                global_mode=True,
             ),
         },
         {
             "role": "system",
-            "content": _build_chat_turn_prompt(latest_user_question, analysis_context),
+            "content": _build_chat_turn_prompt(
+                latest_user_question,
+                analysis_context,
+                persistent_user_memory_text,
+                global_mode=True,
+            ),
         },
     ]
     messages.extend(combined_history)
@@ -5006,16 +5387,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
         analysis_summary,
     )
 
-    include_insight = _question_requests_insight(latest_user_question)
-    insight = None
-    if include_insight:
-        insight = {
-            "kpis": (analysis.get("kpis") or [])[:6],
-            "trends": (analysis.get("trends") or [])[:5],
-            "risks": (analysis.get("risks") or [])[:5],
-            "recommendations": (analysis.get("recommendations") or [])[:5],
-        }
-    charts_out = (analysis.get("charts") or [])[:3]
+    insight, charts_out = _build_chat_companion_payload(analysis, latest_user_question)
 
     return {
         "answer": answer,

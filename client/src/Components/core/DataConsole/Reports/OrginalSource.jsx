@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useDispatch, useSelector } from "react-redux";
 import {
   CircularProgress,
@@ -40,6 +40,7 @@ import {
 } from "../../../../Utils/aiSessionInsightPrefs";
 import { commentImpliesHideInsight } from "../../../../Utils/aiInsightFeedback";
 import { resolveAiModelSelection } from "../../../../Utils/resolveAiModelSelection";
+import { consumeGlobalChatInsightNavForRoute } from "../../../../Utils/globalChatInsightNav";
 import { setFilters } from "../../../../redux/Slices/AdvancedFilterSlice";
 import toast from "react-hot-toast";
 
@@ -52,6 +53,7 @@ const OrginalSource = ({ routeName }) => {
   );
   const dispatch = useDispatch();
   const navigate = useNavigate();
+  const location = useLocation();
   const selectedObject = useSelector((state) => state.selectedObject.value);
   const user = useSelector((state) => state.auth?.user);
   const [data, setData] = useState([]);
@@ -167,9 +169,23 @@ const OrginalSource = ({ routeName }) => {
     }));
   };
 
-  const applyKpiActionOverrides = (result) => {
+  const buildKpiActionMap = (titles = []) => {
+    const out = {};
+    (titles || []).forEach((title) => {
+      const normalized = normalizeKpiTitle(title);
+      if (!normalized) return;
+      out[normalized] = {
+        action: "add",
+        title: String(title || normalized),
+        at: Date.now(),
+      };
+    });
+    return out;
+  };
+
+  const applyKpiActionOverrides = (result, actionMapOverride = null) => {
     if (!result || !Array.isArray(result.kpis)) return result;
-    const actionMap = kpiTitleActions || {};
+    const actionMap = actionMapOverride || kpiTitleActions || {};
     const nextKpis = (result.kpis || []).filter((kpi) => {
       const key = normalizeKpiTitle(kpi?.title);
       const action = actionMap[key]?.action;
@@ -313,7 +329,7 @@ const OrginalSource = ({ routeName }) => {
       };
       setAiRequestDebug(payload);
       const result = await analyzeDataset(payload);
-      setAiResult(applyKpiActionOverrides(result));
+      setAiResult(applyKpiActionOverrides(result, opts?.kpiActionMap || null));
       setAiResponseDebug(result);
     } catch (error) {
       console.error("AI analysis error:", error);
@@ -333,6 +349,22 @@ const OrginalSource = ({ routeName }) => {
       setAiLoading(false);
     }
   };
+
+  useEffect(() => {
+    const pending = consumeGlobalChatInsightNavForRoute(location.pathname);
+    if (!pending) return;
+    const titles = Array.isArray(pending.kpis) ? pending.kpis.filter(Boolean) : [];
+    if (!titles.length) return;
+    const actionMap = buildKpiActionMap(titles);
+    setQueuedKpiRequests(titles);
+    setKpiTitleActions(actionMap);
+    setAiDialogOpen(true);
+    if (aiResult) {
+      setAiResult((prev) => applyKpiActionOverrides(prev, actionMap));
+      return;
+    }
+    void handleRunAnalysis(undefined, { kpiActionMap: actionMap });
+  }, [location.pathname]);
 
   const userWantsInsightsRefresh = (text) => {
     const t = (text || "").toLowerCase();

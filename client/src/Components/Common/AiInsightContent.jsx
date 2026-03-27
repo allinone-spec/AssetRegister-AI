@@ -1108,15 +1108,15 @@ const ChartCard = ({ chart, chartIndex, onInsightFeedback, onDrillDown }) => {
           <div className="text-xs text-gray-500 capitalize">{chartType} visualization</div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-purple-50 text-purple-700">
-            {chartType}
-          </span>
+        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-purple-50 text-purple-700">
+          {chartType}
+        </span>
           <InsightFeedbackMenu
             insightId={insightId}
             insightType="chart"
             onInsightFeedback={onInsightFeedback}
           />
-        </div>
+      </div>
       </div>
       <div
         role={drillable ? "button" : undefined}
@@ -1136,10 +1136,10 @@ const ChartCard = ({ chart, chartIndex, onInsightFeedback, onDrillDown }) => {
           drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/70 transition-shadow focus-visible:ring-2 focus-visible:ring-violet-400" : ""
         }`}
       >
-        <div className="rounded-xl bg-gray-50 px-3 py-4">
+      <div className="rounded-xl bg-gray-50 px-3 py-4">
           <ChartRenderer chart={chart} height={260} />
-        </div>
-        <div className="text-xs text-gray-600 break-words leading-5">{getChartHighlight(chart)}</div>
+      </div>
+      <div className="text-xs text-gray-600 break-words leading-5">{getChartHighlight(chart)}</div>
         {drillable && (
           <div className="text-[11px] font-medium text-violet-700">Click to view chart values and report data</div>
         )}
@@ -1206,7 +1206,7 @@ const NarrativeBlock = ({
                     : undefined
                 }
               >
-                {item}
+            {item}
               </span>
               <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
                 <InsightFeedbackMenu
@@ -1215,7 +1215,7 @@ const NarrativeBlock = ({
                   onInsightFeedback={onInsightFeedback}
                 />
               </div>
-            </li>
+          </li>
           );
         })}
       </ul>
@@ -1230,7 +1230,7 @@ const MaturityCard = ({ maturityScore, onInsightFeedback, onDrillDown, reportRow
   return (
     <div className="border rounded-xl p-4 bg-gradient-to-r from-purple-50 to-blue-50 shadow-sm min-w-0 overflow-hidden">
       <div className="flex items-start justify-between gap-2">
-        <div className="text-sm font-semibold mb-3 text-gray-900">System Health</div>
+      <div className="text-sm font-semibold mb-3 text-gray-900">System Health</div>
         <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
           <InsightFeedbackMenu insightId="maturity" insightType="maturity" onInsightFeedback={onInsightFeedback} />
         </div>
@@ -1279,8 +1279,8 @@ const AtAGlanceCard = ({ items, onInsightFeedback, hiddenInsightIds, onDrillDown
           const lineText = atAGlanceItemText(item);
           const traceCat = atAGlanceTracingCategory(item);
           return (
-            <li
-              key={`overview-${index}`}
+          <li
+            key={`overview-${index}`}
               className="text-sm text-gray-700 leading-6 border-l-4 border-purple-200 pl-3 break-words flex items-start justify-between gap-2 rounded-r-md"
             >
               <span
@@ -1323,7 +1323,7 @@ const AtAGlanceCard = ({ items, onInsightFeedback, hiddenInsightIds, onDrillDown
                   onInsightFeedback={onInsightFeedback}
                 />
               </div>
-            </li>
+          </li>
           );
         })}
       </ul>
@@ -1365,22 +1365,22 @@ const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds, onDrill
         const insightId = `totalInsight-${index}`;
         if (hidden.has(insightId)) return null;
         return (
-          <div
-            key={`${item.title || "total"}-${index}`}
-            className="border rounded-xl p-4 bg-white shadow-sm space-y-2 min-w-0 overflow-hidden"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="font-semibold text-sm text-gray-900 break-words min-w-0">
-                {item.title || `Insight ${index + 1}`}
-              </div>
+        <div
+          key={`${item.title || "total"}-${index}`}
+          className="border rounded-xl p-4 bg-white shadow-sm space-y-2 min-w-0 overflow-hidden"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="font-semibold text-sm text-gray-900 break-words min-w-0">
+              {item.title || `Insight ${index + 1}`}
+            </div>
               <div className="flex items-center gap-1 shrink-0" onMouseDown={(e) => e.stopPropagation()}>
-                <SeverityBadge severity={item.severity} />
+            <SeverityBadge severity={item.severity} />
                 <InsightFeedbackMenu
                   insightId={insightId}
                   insightType="totalInsight"
                   onInsightFeedback={onInsightFeedback}
                 />
-              </div>
+          </div>
             </div>
             <div
               role={drillable ? "button" : undefined}
@@ -1415,13 +1415,13 @@ const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds, onDrill
                   : ""
               }`}
             >
-              <div className="text-sm text-gray-700 leading-6 break-words">
-                {item.text || item.insight}
-              </div>
+          <div className="text-sm text-gray-700 leading-6 break-words">
+            {item.text || item.insight}
+          </div>
               {drillable && (
                 <div className="text-[11px] font-medium text-violet-700 pt-1">Click for underlying data</div>
               )}
-            </div>
+        </div>
           </div>
         );
       })}
@@ -1453,27 +1453,27 @@ const InsightList = ({
               : item.issue || `Row insight ${index + 1}`;
           return (
             <div key={`${type}-${item.column || item.issue || "item"}-${index}`} className="p-4 space-y-2">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="font-semibold text-sm text-gray-900 break-words">
-                    {type === "column"
-                      ? item.column || `Column ${index + 1}`
-                      : item.issue || `Row insight ${index + 1}`}
-                  </div>
-                  <div className="text-[11px] text-gray-500">
-                    {type === "column"
-                      ? "Column-level quality and operational meaning"
-                      : "Row-level issue pattern and operational effect"}
-                  </div>
-                </div>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-semibold text-sm text-gray-900 break-words">
+                {type === "column"
+                  ? item.column || `Column ${index + 1}`
+                  : item.issue || `Row insight ${index + 1}`}
+              </div>
+              <div className="text-[11px] text-gray-500">
+                {type === "column"
+                  ? "Column-level quality and operational meaning"
+                  : "Row-level issue pattern and operational effect"}
+              </div>
+            </div>
                 <div className="flex items-center gap-1 shrink-0" onMouseDown={(e) => e.stopPropagation()}>
-                  <SeverityBadge severity={item.severity || (type === "row" ? "medium" : "low")} />
+            <SeverityBadge severity={item.severity || (type === "row" ? "medium" : "low")} />
                   <InsightFeedbackMenu
                     insightId={insightId}
                     insightType={type === "column" ? "columnInsight" : "rowInsight"}
                     onInsightFeedback={onInsightFeedback}
                   />
-                </div>
+          </div>
               </div>
               <div
                 role={drillable ? "button" : undefined}
@@ -1514,23 +1514,23 @@ const InsightList = ({
                   drillable ? "cursor-pointer hover:bg-slate-50/80 focus-visible:ring-2 focus-visible:ring-violet-300/50" : ""
                 }`}
               >
-                <div className="text-sm text-gray-700 leading-6 break-words">
-                  {item.insight || item.text}
-                </div>
-                {type === "row" && item.operational_risk && (
-                  <div className="text-xs text-red-700 bg-red-50 rounded-md px-3 py-2 leading-5 break-words">
-                    {item.operational_risk}
-                  </div>
-                )}
-                {item.recommendation && (
-                  <div className="text-xs text-blue-700 bg-blue-50 rounded-md px-3 py-2 leading-5 break-words">
-                    {item.recommendation}
-                  </div>
-                )}
+          <div className="text-sm text-gray-700 leading-6 break-words">
+            {item.insight || item.text}
+          </div>
+          {type === "row" && item.operational_risk && (
+            <div className="text-xs text-red-700 bg-red-50 rounded-md px-3 py-2 leading-5 break-words">
+              {item.operational_risk}
+            </div>
+          )}
+          {item.recommendation && (
+            <div className="text-xs text-blue-700 bg-blue-50 rounded-md px-3 py-2 leading-5 break-words">
+              {item.recommendation}
+            </div>
+          )}
                 {drillable && (
                   <div className="text-[11px] font-medium text-violet-700">
                     Click for report data behind this insight
-                  </div>
+        </div>
                 )}
               </div>
             </div>
@@ -2982,14 +2982,14 @@ const AiInsightContent = ({
                       className="border rounded-xl p-3 text-sm bg-white shadow-sm min-h-[110px] hover:shadow-md transition-shadow"
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div className="font-medium text-gray-800">{kpi.title}</div>
+                  <div className="font-medium text-gray-800">{kpi.title}</div>
                         <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
                           <InsightFeedbackMenu
                             insightId={insightId}
                             insightType="kpi"
                             onInsightFeedback={onInsightFeedback}
                           />
-                        </div>
+                    </div>
                       </div>
                       <div
                         role={kpiDrillable ? "button" : undefined}
@@ -3013,17 +3013,17 @@ const AiInsightContent = ({
                       >
                         {kpi.value !== undefined && (
                           <div className="text-xl font-semibold text-gray-900 break-all">{kpi.value}</div>
-                        )}
-                        {kpi.description && (
+                  )}
+                  {kpi.description && (
                           <div className="text-xs text-gray-600 leading-5 break-words">{kpi.description}</div>
                         )}
                         {kpiDrillable && (
                           <div className="text-[11px] font-medium text-violet-700 pt-1">
                             Click for underlying report data
-                          </div>
-                        )}
+                    </div>
+                  )}
                       </div>
-                    </li>
+                </li>
                   );
                 })}
             </ul>

@@ -264,6 +264,48 @@ class AIStateStore:
                 (day_key, org_id, user_id, page_id, dataset_key),
             )
 
+    def list_recent_user_chat_messages(
+        self,
+        org_id: str,
+        user_id: str,
+        limit_sessions: int = 20,
+        limit_messages: int = 80,
+    ) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT day_key, page_id, messages_json, updated_at
+                FROM chat_sessions
+                WHERE org_id = ? AND user_id = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (org_id, user_id, limit_sessions),
+            ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                messages = json.loads(row["messages_json"])
+            except Exception:
+                messages = []
+            if not isinstance(messages, list):
+                continue
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                out.append(
+                    {
+                        "dayKey": row["day_key"],
+                        "pageId": row["page_id"],
+                        "updatedAt": row["updated_at"],
+                        "role": msg.get("role"),
+                        "content": msg.get("content"),
+                    }
+                )
+                if len(out) >= limit_messages:
+                    return out
+        return out
+
     def add_feedback(
         self,
         day_key: str,
@@ -302,6 +344,41 @@ class AIStateStore:
                 (day_key, org_id, user_id, page_id, dataset_key),
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
+
+    def list_recent_user_feedback(
+        self,
+        org_id: str,
+        user_id: str,
+        limit: int = 80,
+    ) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT day_key, page_id, payload_json, created_at
+                FROM feedback
+                WHERE org_id = ? AND user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (org_id, user_id, limit),
+            ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                continue
+            out.append(
+                {
+                    **payload,
+                    "_dayKey": row["day_key"],
+                    "_pageId": row["page_id"],
+                    "_createdAt": row["created_at"],
+                }
+            )
+        return out
 
     def clear_feedback(
         self,
