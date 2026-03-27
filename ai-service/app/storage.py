@@ -73,6 +73,9 @@ class AIStateStore:
                 );
                 """
             )
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(dataset_snapshots)").fetchall()]
+            if "meta_json" not in cols:
+                conn.execute("ALTER TABLE dataset_snapshots ADD COLUMN meta_json TEXT")
 
     def get_cached_analysis(self, day_key: str, dataset_key: str) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
@@ -129,17 +132,31 @@ class AIStateStore:
                 (day_key, dataset_key),
             )
 
-    def get_dataset_snapshot(self, day_key: str, dataset_key: str) -> Optional[List[Dict[str, Any]]]:
+    def get_dataset_snapshot(
+        self, day_key: str, dataset_key: str
+    ) -> Optional[tuple[List[Dict[str, Any]], Dict[str, Any]]]:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT rows_json
+                SELECT rows_json, meta_json
                 FROM dataset_snapshots
                 WHERE day_key = ? AND dataset_key = ?
                 """,
                 (day_key, dataset_key),
             ).fetchone()
-        return json.loads(row["rows_json"]) if row else None
+        if not row:
+            return None
+        rows = json.loads(row["rows_json"])
+        meta_raw = row["meta_json"]
+        meta: Dict[str, Any] = {}
+        if meta_raw:
+            try:
+                parsed = json.loads(meta_raw)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except json.JSONDecodeError:
+                pass
+        return rows, meta
 
     def save_dataset_snapshot(
         self,
@@ -147,19 +164,22 @@ class AIStateStore:
         dataset_key: str,
         page_id: str,
         rows: List[Dict[str, Any]],
+        meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        meta_json = json.dumps(meta) if meta else None
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO dataset_snapshots (day_key, dataset_key, page_id, rows_json, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO dataset_snapshots (day_key, dataset_key, page_id, rows_json, meta_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(day_key, dataset_key) DO UPDATE SET
                     page_id = excluded.page_id,
                     rows_json = excluded.rows_json,
+                    meta_json = excluded.meta_json,
                     updated_at = excluded.updated_at
                 """,
-                (day_key, dataset_key, page_id, json.dumps(rows), now),
+                (day_key, dataset_key, page_id, json.dumps(rows), meta_json, now),
             )
 
     def clear_dataset_snapshot(self, day_key: str, dataset_key: str) -> None:

@@ -676,7 +676,7 @@ def _dataset_key(
     resolved_model_id: Optional[str] = None,
 ) -> str:
     # Bump this to force re-generation when we change prompt structure/context injection.
-    analysis_cache_version = "register-tracing-v9-tabular-chat-summary"
+    analysis_cache_version = "register-tracing-v10-register-total-records-kpi"
     raw = {
         "orgId": payload.orgId,
         "userId": payload.userId,
@@ -762,7 +762,12 @@ def fetch_job_table_all(settings: Settings, payload: AnalyzeRequest, request: Op
         return _fetch_paginated_rows(headers, body, url_base, "job data endpoint")
 
 
-def fetch_register_detailed_all(settings: Settings, payload: AnalyzeRequest, request: Optional[Request] = None) -> List[Dict[str, Any]]:
+def fetch_register_detailed_all(
+    settings: Settings, payload: AnalyzeRequest, request: Optional[Request] = None
+) -> tuple[List[Dict[str, Any]], Optional[int]]:
+    """
+    Returns (rows, total_records_hint). total_records_hint prefers API totalRecords (matches UI Total: badge).
+    """
     filters = payload.filters or {}
     dashboard = filters.get("dashboardData") or {}
     object_id = dashboard.get("objectId")
@@ -780,9 +785,21 @@ def fetch_register_detailed_all(settings: Settings, payload: AnalyzeRequest, req
     body = {**saved_filters, "filterKey": filter_key}
     try:
         data = _request_json("POST", url, headers, body, allow_invalid_json=True)
-        return _extract_rows(data, "register detailed endpoint")
+        rows = _extract_rows(data, "register detailed endpoint")
+        total_hint: Optional[int] = None
+        if isinstance(data, dict):
+            tr = data.get("totalRecords")
+            if tr is not None:
+                try:
+                    total_hint = int(tr)
+                except (TypeError, ValueError):
+                    total_hint = None
+        if total_hint is None:
+            total_hint = len(rows)
+        return rows, total_hint
     except ValueError:
-        return _fetch_paginated_rows(headers, body, url_base, "register detailed endpoint")
+        paginated = _fetch_paginated_rows(headers, body, url_base, "register detailed endpoint")
+        return paginated, len(paginated)
 
 
 def fetch_security_console_rows(
@@ -2167,6 +2184,38 @@ def _build_kpis(df: pd.DataFrame, anomalies: List[Dict[str, Any]]) -> List[Dict[
             }
         )
     return kpis
+
+
+def _apply_authoritative_total_records_kpi(
+    merged: Dict[str, Any],
+    authoritative: int,
+    rows_in_sample: int,
+) -> None:
+    """Register /detailed uses a row sample for LLM; KPI should match API totalRecords, not len(sample)."""
+    if authoritative <= 0:
+        return
+    kpis = merged.get("kpis")
+    if isinstance(kpis, list):
+        for k in kpis:
+            if not isinstance(k, dict):
+                continue
+            t = str(k.get("title") or "").strip().lower().replace("_", " ")
+            while "  " in t:
+                t = t.replace("  ", " ")
+            if t in ("total records", "total record"):
+                k["value"] = authoritative
+                k["description"] = (
+                    f"Total rows for this register (API totalRecords). "
+                    f"Profiling sample sent to the model: {rows_in_sample} rows."
+                )
+                break
+    ts = merged.get("tabularDataSummary")
+    if isinstance(ts, dict):
+        ts["total_rows"] = authoritative
+        ts["profiling_sample_rows"] = rows_in_sample
+    meta = merged.get("analysisMeta")
+    if isinstance(meta, dict):
+        meta["registerTotalRecords"] = authoritative
 
 
 def _base_analysis(df: pd.DataFrame, anomalies: List[Dict[str, Any]], charts: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -4412,6 +4461,7 @@ def _analysis_from_rows(
     import_tracing_context: Optional[str] = None,
     register_tracing_context: Optional[str] = None,
     analysis_profile: Optional[str] = None,
+    authoritative_row_total: Optional[int] = None,
 ) -> Dict[str, Any]:
     df = _to_df(rows)
     df_cols = list(df.columns)
@@ -4486,6 +4536,8 @@ def _analysis_from_rows(
     merged = _merge_llm_chunks(base, llm_chunks)
     _strip_redundant_total_rows_kpi(merged)
     _dedupe_total_records_total_insights(merged)
+    if authoritative_row_total is not None:
+        _apply_authoritative_total_records_kpi(merged, authoritative_row_total, int(len(df)))
     _filter_irrelevant_insights(merged, feedback_list or [])
     stats_blk = (summary.get("statistics") or {}) if isinstance(summary, dict) else {}
     num_prev = summary.get("numeric_summary") if isinstance(summary, dict) else {}
@@ -4520,7 +4572,12 @@ def _analysis_from_rows(
     return merged
 
 
-def _get_rows_for_payload(settings: Settings, payload: AnalyzeRequest, request: Optional[Request] = None) -> List[Dict[str, Any]]:
+def _get_rows_for_payload(
+    settings: Settings,
+    payload: AnalyzeRequest,
+    request: Optional[Request] = None,
+    snapshot_meta_out: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     _ensure_supported_page_id(payload.pageId)
     if payload.pageId == "admin-console/overview":
         return fetch_admin_console_overview_rows(settings, payload, request)
@@ -4550,7 +4607,10 @@ def _get_rows_for_payload(settings: Settings, payload: AnalyzeRequest, request: 
     }:
         return fetch_security_console_rows(settings, payload, request)
     if payload.pageId == "data-console/register/detailed":
-        rows = fetch_register_detailed_all(settings, payload, request)
+        full_rows, total_hint = fetch_register_detailed_all(settings, payload, request)
+        if snapshot_meta_out is not None and total_hint is not None:
+            snapshot_meta_out["registerTotalRecords"] = int(total_hint)
+        rows = full_rows
         # Token guardrail: registering detailed can be very large; sample for analysis.
         max_rows = 300
         if isinstance(rows, list) and len(rows) > max_rows:
@@ -4577,15 +4637,17 @@ def _run_dataset_snapshot_job(
     store: AIStateStore,
     payload: AnalyzeRequest,
     request: Optional[Request] = None,
-) -> tuple[List[Dict[str, Any]], bool]:
+) -> tuple[List[Dict[str, Any]], bool, Dict[str, Any]]:
     day_key = utc_day_key()
     dataset_key = _dataset_key(payload, resolved_model_id=None)
-    cached_rows = store.get_dataset_snapshot(day_key, dataset_key)
-    if cached_rows is not None:
-        return cached_rows, True
-    rows = _get_rows_for_payload(settings, payload, request)
-    store.save_dataset_snapshot(day_key, dataset_key, payload.pageId, rows)
-    return rows, False
+    cached = store.get_dataset_snapshot(day_key, dataset_key)
+    if cached is not None:
+        rows, snap_meta = cached
+        return rows, True, snap_meta
+    snap_meta: Dict[str, Any] = {}
+    rows = _get_rows_for_payload(settings, payload, request, snapshot_meta_out=snap_meta)
+    store.save_dataset_snapshot(day_key, dataset_key, payload.pageId, rows, meta=snap_meta or None)
+    return rows, False, snap_meta
 
 
 def _ensure_daily_analysis(
@@ -4676,8 +4738,27 @@ def _ensure_daily_analysis(
                 )
         except Exception:
             pass
+        if _is_register_detailed_page_id(payload.pageId):
+            try:
+                snapshot_ds_key = _dataset_key(payload, resolved_model_id=None)
+                ds = store.get_dataset_snapshot(day_key, snapshot_ds_key)
+                if ds:
+                    snap_rows, snap_meta = ds
+                    tr = (snap_meta or {}).get("registerTotalRecords")
+                    if tr is not None:
+                        _apply_authoritative_total_records_kpi(cached, int(tr), len(snap_rows))
+            except Exception:
+                pass
         return cached
-    rows, _ = _run_dataset_snapshot_job(settings, store, payload, request)
+    rows, _, snap_meta = _run_dataset_snapshot_job(settings, store, payload, request)
+    authoritative_register_total: Optional[int] = None
+    if isinstance(snap_meta, dict):
+        tr_raw = snap_meta.get("registerTotalRecords")
+        if tr_raw is not None:
+            try:
+                authoritative_register_total = int(tr_raw)
+            except (TypeError, ValueError):
+                authoritative_register_total = None
     if dbg_page_id == "admin-console/overview":
         response = _build_admin_console_overview_response(
             settings, model_id, payload, request, feedback_list, chat_messages
@@ -4746,6 +4827,7 @@ def _ensure_daily_analysis(
         import_tracing_context=import_tracing_context or None,
         register_tracing_context=register_tracing_context or None,
         analysis_profile=payload.pageId,
+        authoritative_row_total=authoritative_register_total,
     )
     if _is_report_job_detail_page_id(payload.pageId):
         if not importTracingObj:
