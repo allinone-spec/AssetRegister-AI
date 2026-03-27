@@ -781,7 +781,7 @@ function InsightDrillDownModal({
         <DialogContent className="flex flex-col items-center justify-center gap-4 py-12 bg-slate-50/50">
           <CircularProgress size={40} sx={{ color: "#7c3aed" }} />
           <div className="text-sm text-slate-600 text-center px-4 leading-relaxed max-w-xs">
-            Fetching rows for this drill-down. Large jobs may take a few seconds.
+            Fetching rows for this drill-down. Large jobs may take long time.
           </div>
         </DialogContent>
         <DialogActions className="px-4 py-3 bg-white border-t border-slate-100">

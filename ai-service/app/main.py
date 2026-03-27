@@ -169,6 +169,7 @@ class ChatRequest(BaseModel):
     filters: Dict[str, Any] = {}
     messages: List[ChatMessage]
     modelId: Optional[str] = None
+    focusColumns: Optional[List[str]] = None
 
 
 class GlobalChatRequest(BaseModel):
@@ -180,6 +181,7 @@ class GlobalChatRequest(BaseModel):
     contextFilters: Dict[str, Any] = {}
     messages: List[ChatMessage]
     modelId: Optional[str] = None
+    focusColumns: Optional[List[str]] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -2235,6 +2237,7 @@ def _summarize_df(
             "row_level_summary": {"total_anomaly_rows": 0, "issue_counts": {}, "examples_by_issue": {}},
             "sample_rows": [],
             "user_focus_columns": [],
+            "focus_column_summary": {},
         }
     duplicate_rows = int(df.astype(str).duplicated().sum())
     missing_cells = int(df.isnull().sum().sum())
@@ -2277,7 +2280,36 @@ def _summarize_df(
         "sample_rows": df.head(12).where(pd.notnull(df), None).to_dict(orient="records"),
     }
     if focus_columns:
-        result["user_focus_columns"] = [c for c in focus_columns if c in df.columns]
+        focus_in_df = [c for c in focus_columns if c in df.columns]
+        result["user_focus_columns"] = focus_in_df
+        focus_summary: Dict[str, Any] = {}
+        total_rows = max(int(len(df)), 1)
+        for col in focus_in_df:
+            s = df[col]
+            non_null = int(s.notna().sum())
+            missing = int(s.isna().sum())
+            distinct = _safe_nunique(s, dropna=True)
+            item: Dict[str, Any] = {
+                "dtype": str(s.dtype),
+                "non_null_count": non_null,
+                "missing_count": missing,
+                "missing_ratio": round(missing / total_rows, 4),
+                "distinct_count": distinct,
+            }
+            if pd.api.types.is_numeric_dtype(s):
+                numeric = pd.to_numeric(s, errors="coerce").dropna()
+                if not numeric.empty:
+                    item["numeric_stats"] = {
+                        "min": float(numeric.min()),
+                        "max": float(numeric.max()),
+                        "mean": float(round(numeric.mean(), 2)),
+                        "median": float(round(numeric.median(), 2)),
+                        "p95": float(round(numeric.quantile(0.95), 2)),
+                    }
+            vc = s.fillna("NULL").astype(str).value_counts().head(8)
+            item["top_values"] = {str(k): int(v) for k, v in vc.to_dict().items()}
+            focus_summary[str(col)] = item
+        result["focus_column_summary"] = focus_summary
     return result
 
 
@@ -2860,6 +2892,12 @@ def _build_compact_data_summary_for_chat(analysis: Dict[str, Any]) -> str:
         num_prev = tab.get("numeric_summary_preview") or {}
         if isinstance(num_prev, dict) and num_prev:
             lines.append("numeric_summary_preview (JSON): " + json.dumps(num_prev, default=str)[:6000])
+        focus_cols = tab.get("focus_columns") or []
+        if isinstance(focus_cols, list) and focus_cols:
+            lines.append("user_focus_columns: " + ", ".join(str(c) for c in focus_cols[:40]))
+            fsum = tab.get("focus_column_summary") or {}
+            if isinstance(fsum, dict) and fsum:
+                lines.append("focus_column_summary (JSON): " + json.dumps(fsum, default=str)[:7000])
         lines.append("")
     meta = analysis.get("analysisMeta") or {}
     if meta:
@@ -3081,6 +3119,8 @@ def _build_chat_turn_prompt(
     persistent_user_memory_text: str = "",
     *,
     global_mode: bool = False,
+    scope_hint: str = "",
+    focus_columns: Optional[List[str]] = None,
 ) -> str:
     """
     Build a focused per-turn instruction so chat replies stay holistic AND grounded
@@ -3119,26 +3159,33 @@ def _build_chat_turn_prompt(
     top_relevant = [c for c in ranked[:10] if c and len(c.strip()) > 0]
     if not top_relevant:
         top_relevant = [c for c in candidates[:6] if c]
+    compact = str(analysis_context.get("compactSummaryText") or "").strip()
+    compact_excerpt = compact[:2200] if compact else ""
+    scope_line = str(scope_hint or "").strip()
+    focus_cols = [str(c).strip() for c in (focus_columns or []) if str(c).strip()]
+    focus_line = ", ".join(focus_cols[:30])
 
-    return (
-        "CURRENT USER QUESTION:\n"
-        f"{q}\n\n"
-        "RELEVANT USER MEMORY:\n"
-        f"{persistent_user_memory_text or '(none yet)'}\n\n"
-        "MOST RELEVANT DATA CONTEXT FOR THIS QUESTION:\n"
-        f"{json.dumps(top_relevant[:10], indent=2, default=str)}\n\n"
-        "ANSWER QUALITY RULES:\n"
-        "- Give a holistic answer directly tied to the question and dataset context above.\n"
-        "- Explain: what it means, why it matters, and what to do next.\n"
-        "- Cite concrete data points when available (KPI names/values, trends, statuses, counts).\n"
-        "- If exact data is unavailable for a part of the question, state that clearly and use closest available evidence.\n"
-        "- Avoid generic textbook advice that is not tied to this dataset.\n"
-        + (
-            "- Keep the tone naturally conversational and assistant-like, not robotic.\n"
-            if global_mode
-            else ""
-        )
-    )
+    parts = [
+        ("ACTIVE CHAT CONTEXT:\n" + scope_line + "\n\n" if scope_line else ""),
+        "CURRENT USER QUESTION:\n",
+        f"{q}\n\n",
+        "RELEVANT USER MEMORY:\n",
+        f"{persistent_user_memory_text or '(none yet)'}\n\n",
+        "COMPACT DATA SUMMARY (today, this context):\n",
+        f"{compact_excerpt or '(no compact summary available)'}\n\n",
+        ("USER-SELECTED FOCUS COLUMNS (highest priority):\n" + focus_line + "\n\n" if focus_line else ""),
+        "MOST RELEVANT DATA CONTEXT FOR THIS QUESTION:\n",
+        f"{json.dumps(top_relevant[:10], indent=2, default=str)}\n\n",
+        "ANSWER QUALITY RULES:\n",
+        "- Give a holistic answer directly tied to the question and dataset context above.\n",
+        ("- Prioritize analysis/explanations around the selected focus columns whenever relevant.\n" if focus_line else ""),
+        "- Explain: what it means, why it matters, and what to do next.\n",
+        "- Cite concrete data points when available (KPI names/values, trends, statuses, counts).\n",
+        "- If exact data is unavailable for a part of the question, state that clearly and use closest available evidence.\n",
+        "- Avoid generic textbook advice that is not tied to this dataset.\n",
+        ("- Keep the tone naturally conversational and assistant-like, not robotic.\n" if global_mode else ""),
+    ]
+    return "".join(parts)
 
 
 def _resolve_global_analysis_scope(payload: GlobalChatRequest) -> tuple[str, str, Dict[str, Any]]:
@@ -3350,6 +3397,8 @@ def _build_analysis_user_prompt(
     import_tracing_context: Optional[str] = None,
     register_tracing_context: Optional[str] = None,
 ) -> str:
+    focus_cols = summary.get("user_focus_columns") or []
+    focus_summary = summary.get("focus_column_summary") or {}
     base = (
         "DATASET SUMMARY:\n"
         f"{json.dumps(summary, indent=2, default=str)}\n\n"
@@ -3362,6 +3411,16 @@ def _build_analysis_user_prompt(
         "Also provide charts that help frontend pages show the most useful visual summaries instantly.\n"
         "Provide structured outputs suitable for dashboards."
     )
+    if isinstance(focus_cols, list) and focus_cols:
+        base += (
+            "\n\n"
+            "USER-SELECTED FOCUS COLUMNS (highest priority):\n"
+            f"{json.dumps(focus_cols[:40], default=str)}\n\n"
+            "FOCUS COLUMNS RAW-DATA SUMMARY (authoritative; computed from raw rows):\n"
+            f"{json.dumps(focus_summary, indent=2, default=str)}\n\n"
+            "Prioritize these focus columns in totalInsights, columnInsights, rowInsights, risks, "
+            "recommendations, and KPI narratives. Use concrete values from this focus summary."
+        )
     if feedback_instructions:
         base += f"\n\n{feedback_instructions}"
     if import_tracing_context:
@@ -5005,6 +5064,8 @@ def _analysis_from_rows(
         "missing_cells": stats_blk.get("missing_cells"),
         "duplicate_rows": stats_blk.get("duplicate_rows"),
         "numeric_summary_preview": num_preview,
+        "focus_columns": (summary.get("user_focus_columns") or [])[:40] if isinstance(summary, dict) else [],
+        "focus_column_summary": (summary.get("focus_column_summary") or {}) if isinstance(summary, dict) else {},
     }
     merged["analysisMeta"] = {
         "dayKey": utc_day_key(),
@@ -5368,6 +5429,7 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
         category=payload.category,
         filters=payload.filters,
         modelId=model_id,
+        focusColumns=payload.focusColumns,
     )
     analysis = _ensure_daily_analysis(settings, store, analysis_payload, request)
     analysis_summary = analysis.get("analysisSummary", {})
@@ -5394,7 +5456,13 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
         },
         {
             "role": "system",
-            "content": _build_chat_turn_prompt(latest_user_question, analysis_context, persistent_user_memory_text),
+            "content": _build_chat_turn_prompt(
+                latest_user_question,
+                analysis_context,
+                persistent_user_memory_text,
+                scope_hint=f"page={payload.pageId} category={payload.category}",
+                focus_columns=payload.focusColumns,
+            ),
         },
     ]
     messages.extend(combined_history)
@@ -5426,6 +5494,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
         category=resolved_category,
         filters=resolved_filters,
         modelId=model_id,
+        focusColumns=payload.focusColumns,
     )
     analysis = _ensure_daily_analysis(settings, store, analysis_payload, request)
     analysis_summary = analysis.get("analysisSummary", {})
@@ -5473,6 +5542,11 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
                 analysis_context,
                 persistent_user_memory_text,
                 global_mode=True,
+                scope_hint=(
+                    f"resolvedPage={resolved_page_id} category={resolved_category} "
+                    f"console={payload.consoleType} module={payload.moduleKey or ''}"
+                ),
+                focus_columns=payload.focusColumns,
             ),
         },
     ]

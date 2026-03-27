@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
-import { useDispatch, useSelector } from "react-redux";
+import { useLocation } from "react-router-dom";
+import { useSelector } from "react-redux";
 import {
   Button,
   CircularProgress,
@@ -12,14 +12,12 @@ import {
   Typography,
 } from "@mui/material";
 import { MessageCircle, Sparkles, X } from "lucide-react";
-import { clearGlobalChatSession, fetchAiModels, globalChat } from "../../Service/ai.service";
+import { clearGlobalChatSession, fetchAiModels, globalChat, submitInsightFeedback } from "../../Service/ai.service";
 import { resolveAiModelSelection } from "../../Utils/resolveAiModelSelection";
 import { getRequest } from "../../Service/api.service";
 import { getRequest as getAdminRequest } from "../../Service/Console.service";
 import AiChatAssistantMessage from "./AiChatAssistantMessage";
 import { normalizeKpiTitle } from "../../Utils/aiChatKpiExtract";
-import { saveGlobalChatInsightNav } from "../../Utils/globalChatInsightNav";
-import { setSelectedObject, setSelectedObjectName } from "../../redux/Slices/ObjectSelection";
 
 const HEADER_OBJECT = "__header__";
 
@@ -46,11 +44,10 @@ const SECURITY_SUBS = [
 ];
 
 const GLOBAL_CHATBOT_STATE_KEY = "global-chatbot-state-v2";
+const buildChatMessageId = () => `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 const GlobalChatbot = () => {
   const location = useLocation();
-  const navigate = useNavigate();
-  const dispatch = useDispatch();
   const user = useSelector((state) => state.auth?.user);
   const selectedObject = useSelector((state) => state.selectedObject?.value);
 
@@ -115,9 +112,15 @@ const GlobalChatbot = () => {
           selectedModelId,
           kpiTitleActions,
           messages: messages.slice(-40).map((m) => ({
+            messageId: m.messageId,
             role: m.role,
             content: m.content,
             enableKpiPanel: m.enableKpiPanel,
+            feedbackType: m.feedbackType || "",
+            addedToInsights: Boolean(m.addedToInsights),
+            insight: m.insight || null,
+            charts: Array.isArray(m.charts) ? m.charts : [],
+            kpisSnapshot: Array.isArray(m.kpisSnapshot) ? m.kpisSnapshot : [],
           })),
         })
       );
@@ -376,9 +379,12 @@ const GlobalChatbot = () => {
     setOnboardDone(true);
     setMessages([
       {
+        messageId: buildChatMessageId(),
         role: "assistant",
         content: `I’m ready with this context: ${scopeSummary}.\n\nAsk naturally. You can ask for summaries, trends, risks, comparisons, KPIs, visuals, or next actions, and I’ll stay grounded in the data available for this scope.`,
         enableKpiPanel: false,
+        feedbackType: "",
+        addedToInsights: false,
       },
     ]);
   };
@@ -394,62 +400,52 @@ const GlobalChatbot = () => {
     });
   }, []);
 
-  const insightTargetRoute = useMemo(() => {
-    if (consoleType !== "data") return "";
-    if (dataModule === "reports") {
-      return reportJobName
-        ? `/data-console/reports/original-source/jobs/${reportJobName}`
-        : "/data-console/reports/original-source";
-    }
-    if (dataModule === "register") return "/data-console/register/detailed";
-    return "";
-  }, [consoleType, dataModule, reportJobName]);
-
-  const handleGoToInsightPanel = useCallback(
-    (selectedKpis) => {
-      const route = insightTargetRoute;
-      if (!route || !Array.isArray(selectedKpis) || selectedKpis.length === 0) return;
-      const matchedJobRow =
-        dataModule === "reports" && reportJobName
-          ? (filteredJobRows.find((row) => String(row?.jobName || "").trim() === String(reportJobName).trim()) ||
-            jobRows.find((row) => String(row?.jobName || "").trim() === String(reportJobName).trim()) ||
-            null)
-          : null;
-      const objectName =
-        chatObjectId === HEADER_OBJECT
-          ? objects.find((o) => String(o.objectId) === String(selectedObject))?.objectName || ""
-          : objects.find((o) => String(o.objectId) === String(chatObjectId))?.objectName || "";
-
-      if (resolvedObjectId != null && String(resolvedObjectId).trim() !== "") {
-        dispatch(setSelectedObject(String(resolvedObjectId)));
-        if (objectName) dispatch(setSelectedObjectName(objectName));
-        localStorage.setItem("selectedObject", String(resolvedObjectId));
-        if (objectName) localStorage.setItem("selectedObjectName", objectName);
+  const handleChatMessageFeedback = useCallback(
+    async (message, feedbackType) => {
+      if (!message?.messageId || !feedbackType) return;
+      try {
+        await submitInsightFeedback({
+          orgId: user?.orgId || "default-org",
+          userId: user?.id || localStorage.getItem("user-id") || "anonymous",
+          pageId: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
+          category: "global-chat",
+          filters: contextFilters,
+          kpiId: message.messageId,
+          insightType: "chat_answer",
+          feedbackType,
+          useful: feedbackType === "helpful",
+          comment: undefined,
+        });
+        setMessages((prev) =>
+          prev.map((item) => (item?.messageId === message.messageId ? { ...item, feedbackType } : item))
+        );
+      } catch {
+        // Ignore feedback failures to keep chat flow smooth.
       }
-
-      saveGlobalChatInsightNav({
-        route,
-        objectId: resolvedObjectId,
-        objectName,
-        kpis: selectedKpis.map((x) => x.title).filter(Boolean),
-      });
-      setOpen(false);
-      navigate(route, matchedJobRow ? { state: matchedJobRow } : undefined);
     },
-    [
-      insightTargetRoute,
-      dataModule,
-      reportJobName,
-      filteredJobRows,
-      jobRows,
-      chatObjectId,
-      objects,
-      selectedObject,
-      resolvedObjectId,
-      dispatch,
-      navigate,
-    ],
+    [user?.orgId, user?.id, location.pathname, contextFilters]
   );
+
+  const handleAddToInsights = useCallback(async (message) => {
+    if (!message?.messageId || message?.addedToInsights) return;
+    const raw = String(message?.content || "").trim();
+    if (!raw) return;
+    setMessages((prev) =>
+      prev.map((item) => {
+        if (item?.messageId !== message.messageId) return item;
+        const currentInsight = item?.insight && typeof item.insight === "object" ? item.insight : {};
+        const currentRecs = Array.isArray(currentInsight.recommendations) ? currentInsight.recommendations : [];
+        return {
+          ...item,
+          addedToInsights: true,
+          insight: {
+            ...currentInsight,
+            recommendations: [...currentRecs, { text: raw.slice(0, 1200) }],
+          },
+        };
+      })
+    );
+  }, []);
 
   const handleSend = async () => {
     const question = chatInput.trim();
@@ -473,18 +469,22 @@ const GlobalChatbot = () => {
       setMessages((prev) => [
         ...prev,
         {
+          messageId: buildChatMessageId(),
           role: "assistant",
           content: res?.answer || "No response returned.",
           insight: res?.insight || null,
           charts: Array.isArray(res?.charts) ? res.charts : [],
           kpisSnapshot: Array.isArray(res?.insight?.kpis) ? res.insight.kpis : [],
           enableKpiPanel: true,
+          feedbackType: "",
+          addedToInsights: false,
         },
       ]);
     } catch (err) {
       setMessages((prev) => [
         ...prev,
         {
+          messageId: buildChatMessageId(),
           role: "assistant",
           content:
             err?.response?.data?.message ||
@@ -495,6 +495,8 @@ const GlobalChatbot = () => {
                 : "") ||
             err?.message ||
             "Sorry, I could not process that right now.",
+          feedbackType: "",
+          addedToInsights: false,
         },
       ]);
     } finally {
@@ -798,7 +800,8 @@ const GlobalChatbot = () => {
                           kpiTitleActions={kpiTitleActions}
                           onToggleKpiLine={handleToggleKpiLine}
                           kpiPanelHelpText="Tick lines to remember KPI ideas for this chat session."
-                          onGoToInsightPanel={handleGoToInsightPanel}
+                          onMessageFeedback={handleChatMessageFeedback}
+                          onAddToInsight={handleAddToInsights}
                         />
                       )}
                     </div>

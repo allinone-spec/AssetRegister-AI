@@ -12,12 +12,15 @@ export default function AiChatAssistantMessage({
   kpiTitleActions = {},
   onToggleKpiLine,
   kpiPanelHelpText,
-  onGoToInsightPanel,
+  onMessageFeedback,
+  onAddToInsight,
+  showContextFromInsights = true,
+  showAddToDashboardKpis = true,
 }) {
   const charts = message?.charts;
   const kpisSnapshot = message?.kpisSnapshot;
-  const showKpiPanel = message?.enableKpiPanel !== false && typeof onToggleKpiLine === "function";
-  const [showInsightPanel, setShowInsightPanel] = useState(false);
+  const showKpiPanel =
+    showAddToDashboardKpis && message?.enableKpiPanel !== false && typeof onToggleKpiLine === "function";
 
   const kpiOptions = useMemo(() => {
     if (Array.isArray(kpisSnapshot) && kpisSnapshot.length > 0) {
@@ -54,16 +57,27 @@ export default function AiChatAssistantMessage({
     });
   }, [kpisSnapshot, message?.content]);
 
-  const selectedKpis = useMemo(
-    () => kpiOptions.filter((item) => kpiTitleActions[item.key]?.action === "add"),
-    [kpiOptions, kpiTitleActions],
-  );
+  const [selectedFeedback, setSelectedFeedback] = useState(message?.feedbackType || "");
+  const [addingInsight, setAddingInsight] = useState(false);
 
   useEffect(() => {
-    if (selectedKpis.length === 0) {
-      setShowInsightPanel(false);
+    setSelectedFeedback(message?.feedbackType || "");
+  }, [message?.feedbackType]);
+
+  const handleFeedback = (feedbackType) => {
+    setSelectedFeedback(feedbackType);
+    onMessageFeedback?.(message, feedbackType);
+  };
+
+  const handleAddToInsight = async () => {
+    if (message?.addedToInsights || addingInsight || typeof onAddToInsight !== "function") return;
+    try {
+      setAddingInsight(true);
+      await onAddToInsight(message);
+    } finally {
+      setAddingInsight(false);
     }
-  }, [selectedKpis.length]);
+  };
 
   return (
     <>
@@ -74,8 +88,59 @@ export default function AiChatAssistantMessage({
         <span className="font-semibold text-[10px] uppercase tracking-wider text-slate-500">Assistant</span>
       </div>
       <div className="whitespace-pre-wrap break-words text-slate-800 leading-relaxed text-[13px]">{message?.content}</div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+            selectedFeedback === "helpful"
+              ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+              : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+          }`}
+          onClick={() => handleFeedback("helpful")}
+        >
+          Helpful
+        </button>
+        <button
+          type="button"
+          className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+            selectedFeedback === "not_helpful"
+              ? "border-amber-300 bg-amber-50 text-amber-800"
+              : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+          }`}
+          onClick={() => handleFeedback("not_helpful")}
+        >
+          Not helpful
+        </button>
+        <button
+          type="button"
+          className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+            selectedFeedback === "irrelevant"
+              ? "border-rose-300 bg-rose-50 text-rose-800"
+              : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+          }`}
+          onClick={() => handleFeedback("irrelevant")}
+        >
+          Irrelevant
+        </button>
+        {typeof onAddToInsight === "function" && (
+          <button
+            type="button"
+            className={`ml-auto rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+              message?.addedToInsights
+                ? "border-violet-200 bg-violet-50 text-violet-600 cursor-not-allowed"
+                : "border-violet-300 bg-white text-violet-700 hover:bg-violet-50"
+            }`}
+            onClick={handleAddToInsight}
+            disabled={message?.addedToInsights || addingInsight}
+          >
+            {message?.addedToInsights ? "Added to insight" : addingInsight ? "Adding..." : "Add to insight"}
+          </button>
+        )}
+      </div>
 
-      <AiChatContextStrip charts={charts} kpisSnapshot={kpisSnapshot} maxCharts={2} />
+      {showContextFromInsights && (
+        <AiChatContextStrip charts={charts} kpisSnapshot={kpisSnapshot} maxCharts={2} />
+      )}
 
       {showKpiPanel && kpiOptions.length > 0 && (
         <div className="mt-3 rounded-xl border border-violet-200/70 bg-gradient-to-br from-violet-50/80 to-indigo-50/30 p-3 shadow-sm ring-1 ring-violet-100/40">
@@ -110,41 +175,6 @@ export default function AiChatAssistantMessage({
               );
             })}
           </ul>
-          {selectedKpis.length > 0 && (
-            <div className="mt-3 space-y-2">
-              <button
-                type="button"
-                className="inline-flex items-center rounded-lg border border-violet-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-violet-800 hover:bg-violet-50 transition-colors"
-                onClick={() => {
-                  if (typeof onGoToInsightPanel === "function") {
-                    onGoToInsightPanel(selectedKpis);
-                    return;
-                  }
-                  setShowInsightPanel((prev) => !prev);
-                }}
-              >
-                Go to insight panel
-              </button>
-              {typeof onGoToInsightPanel !== "function" && showInsightPanel && (
-                <div className="rounded-xl border border-violet-200/80 bg-white p-3 shadow-sm">
-                  <div className="text-[11px] font-semibold text-violet-950 mb-2">Insight panel</div>
-                  <div className="space-y-2">
-                    {selectedKpis.map((item) => (
-                      <div key={`insight-${item.key}`} className="rounded-lg border border-slate-200/80 bg-slate-50/70 px-3 py-2">
-                        <div className="text-[11px] font-semibold text-slate-900">{item.title}</div>
-                        {item.value ? (
-                          <div className="text-sm font-semibold text-violet-700 mt-0.5">{item.value}</div>
-                        ) : null}
-                        {item.description ? (
-                          <div className="text-[11px] text-slate-600 leading-relaxed mt-1">{item.description}</div>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
     </>

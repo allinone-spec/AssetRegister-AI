@@ -46,6 +46,9 @@ import toast from "react-hot-toast";
 
 const ORIGINAL_SOURCE_AI_PAGE = "data-console/reports/original-source";
 const ORIGINAL_SOURCE_AI_CATEGORY = "jobs";
+const buildChatMessageId = () => `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const aiInsightChatStateKey = (userId, pageId, category) =>
+  `ai-insight-chat-v1:${String(userId || "anonymous")}:${String(pageId || "")}:${String(category || "")}`;
 
 const OrginalSource = ({ routeName }) => {
   const { permissionList, permissionDetails } = useSelector(
@@ -289,6 +292,117 @@ const OrginalSource = ({ routeName }) => {
     }
   };
 
+  const handleChatMessageFeedback = async (message, feedbackType) => {
+    if (!message?.messageId || !feedbackType) return;
+    const basePayload = buildAiPayload();
+    try {
+      await submitInsightFeedback({
+        ...basePayload,
+        kpiId: message.messageId,
+        insightType: "chat_answer",
+        feedbackType,
+        useful: feedbackType === "helpful",
+        comment: undefined,
+      });
+      setChatHistory((prev) =>
+        prev.map((item) =>
+          item?.messageId === message.messageId ? { ...item, feedbackType } : item
+        )
+      );
+    } catch (err) {
+      console.error("Chat answer feedback error:", err);
+      toast.error("Could not save chat feedback. Please retry.");
+    }
+  };
+
+  const handleAddChatAnswerToInsights = async (message) => {
+    if (!message?.messageId || message?.addedToInsights) return;
+    const raw = String(message?.content || "").trim();
+    if (!raw) return;
+    try {
+      await submitInsightFeedback({
+        ...buildAiPayload(),
+        kpiId: message.messageId,
+        insightType: "chat_answer",
+        feedbackType: "helpful",
+        useful: true,
+        comment: "Added to insight from chat answer",
+      });
+    } catch (err) {
+      console.error("Add-to-insight feedback error:", err);
+      toast.error("Could not persist Add to insight for next analysis.");
+      return;
+    }
+    const titleLine = raw
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .find(Boolean);
+    const title = (titleLine || "Chat insight").slice(0, 100);
+    setAiResult((prev) => {
+      const safePrev = prev && typeof prev === "object" ? prev : {};
+      const current = Array.isArray(safePrev.totalInsights) ? safePrev.totalInsights : [];
+      if (current.some((x) => String(x?.chatMessageId || "") === message.messageId)) return safePrev;
+      return {
+        ...safePrev,
+        totalInsights: [
+          ...current,
+          {
+            title,
+            text: raw.slice(0, 1800),
+            severity: "medium",
+            chatMessageId: message.messageId,
+            source: "chat",
+          },
+        ],
+      };
+    });
+    setChatHistory((prev) =>
+      prev.map((item) =>
+        item?.messageId === message.messageId ? { ...item, addedToInsights: true } : item
+      )
+    );
+    toast.success("Added this answer to insight cards.");
+  };
+
+  useEffect(() => {
+    if (!aiDialogOpen) return;
+    const key = aiInsightChatStateKey(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY);
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed?.chatHistory)) return;
+      setChatHistory(
+        parsed.chatHistory.slice(-40).map((m) => ({
+          messageId: m?.messageId || buildChatMessageId(),
+          role: m?.role === "assistant" ? "assistant" : "user",
+          content: String(m?.content || ""),
+          insight: m?.insight || null,
+          charts: Array.isArray(m?.charts) ? m.charts : [],
+          kpisSnapshot: Array.isArray(m?.kpisSnapshot) ? m.kpisSnapshot : [],
+          feedbackType: String(m?.feedbackType || ""),
+          addedToInsights: Boolean(m?.addedToInsights),
+        }))
+      );
+    } catch {
+      // Ignore invalid persisted state.
+    }
+  }, [aiDialogOpen, user?.id]);
+
+  useEffect(() => {
+    const key = aiInsightChatStateKey(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY);
+    try {
+      sessionStorage.setItem(
+        key,
+        JSON.stringify({
+          chatHistory: chatHistory.slice(-40),
+        })
+      );
+    } catch {
+      // Ignore storage quota errors.
+    }
+  }, [chatHistory, user?.id]);
+
   const fetchSoruceData = async (showLoading = true) => {
     showLoading && setLoading(true);
     try {
@@ -396,14 +510,18 @@ const OrginalSource = ({ routeName }) => {
         ...buildAiPayload(),
         messages: newHistory,
         modelId: selectedModelId || undefined,
+        focusColumns: aiFocusColumns?.length ? aiFocusColumns : undefined,
       };
 
       const result = await chatWithData(payload);
       const assistantMessage = {
+        messageId: buildChatMessageId(),
         role: "assistant",
         content: result?.answer || "No answer returned from AI.",
         charts: Array.isArray(result?.charts) ? result.charts : [],
         kpisSnapshot: Array.isArray(aiResult?.kpis) ? aiResult.kpis : [],
+        feedbackType: "",
+        addedToInsights: false,
       };
       setChatHistory((prev) => [...prev, assistantMessage]);
       if (userWantsInsightsRefresh(userMessage.content)) {
@@ -423,7 +541,7 @@ const OrginalSource = ({ routeName }) => {
         "Failed to chat with AI. Please try again.";
       setChatHistory((prev) => [
         ...prev,
-        { role: "assistant", content: errorMessage },
+        { messageId: buildChatMessageId(), role: "assistant", content: errorMessage, feedbackType: "", addedToInsights: false },
       ]);
     } finally {
       setChatLoading(false);
@@ -445,6 +563,11 @@ const OrginalSource = ({ routeName }) => {
     try {
       clearHiddenInsightIds(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY);
       await clearChatSession(buildAiPayload());
+      try {
+        sessionStorage.removeItem(aiInsightChatStateKey(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY));
+      } catch {
+        // noop
+      }
       await handleRunAnalysis();
       toast.success("Insight memory cleared for this dataset.");
     } catch (error) {
@@ -484,6 +607,11 @@ const OrginalSource = ({ routeName }) => {
         ...buildAiPayload(),
         modelId: nextId || undefined,
       });
+      try {
+        sessionStorage.removeItem(aiInsightChatStateKey(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY));
+      } catch {
+        // noop
+      }
       await handleRunAnalysis(undefined, { modelId: nextId });
       toast.success("Switched model — insights refreshed for this dataset.");
     } catch (error) {
@@ -835,6 +963,10 @@ const OrginalSource = ({ routeName }) => {
                       message={m}
                       kpiTitleActions={kpiTitleActions}
                       onToggleKpiLine={handleToggleKpiLine}
+                      onMessageFeedback={handleChatMessageFeedback}
+                      onAddToInsight={handleAddChatAnswerToInsights}
+                      showContextFromInsights={false}
+                      showAddToDashboardKpis={false}
                     />
                   )}
                 </div>
