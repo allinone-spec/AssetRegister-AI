@@ -38,6 +38,8 @@ import {
   persistHiddenInsightIds,
   clearHiddenInsightIds,
 } from "../../../../Utils/aiSessionInsightPrefs";
+import { commentImpliesHideInsight } from "../../../../Utils/aiInsightFeedback";
+import { resolveAiModelSelection } from "../../../../Utils/resolveAiModelSelection";
 import { setFilters } from "../../../../redux/Slices/AdvancedFilterSlice";
 import toast from "react-hot-toast";
 
@@ -109,7 +111,7 @@ const OrginalSource = ({ routeName }) => {
         .then((res) => {
           const list = res?.models || [];
           setAiModels(list);
-          if (list.length && !selectedModelId) setSelectedModelId(list[0].id);
+          setSelectedModelId((prev) => resolveAiModelSelection(prev, list));
         })
         .catch(() => setAiModels([]));
     }
@@ -117,13 +119,23 @@ const OrginalSource = ({ routeName }) => {
 
   const getAiErrorMessage = (error, fallbackMessage) => {
     const errBody = error?.response?.data;
+    const detail = errBody?.detail;
     const rawMessage =
-      errBody?.detail || errBody?.message || error?.message || fallbackMessage;
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((x) => (typeof x === "string" ? x : x?.msg || "")).filter(Boolean).join("; ") ||
+            fallbackMessage
+          : errBody?.message || error?.message || fallbackMessage;
 
-    if (
-      error?.response?.status === 429 ||
-      /RateLimitReached|rate[- ]limit|Too Many Requests/i.test(rawMessage)
-    ) {
+    const status = error?.response?.status;
+    const rateLike =
+      status === 429 ||
+      /\btoo many requests\b/i.test(rawMessage) ||
+      /\brate[\s_-]?limit\b/i.test(rawMessage) ||
+      /RateLimitReached/i.test(rawMessage);
+
+    if (rateLike) {
       return "AI is temporarily busy due to rate limits. Please wait about 1 minute and try again.";
     }
 
@@ -209,6 +221,7 @@ const OrginalSource = ({ routeName }) => {
     pageId: ORIGINAL_SOURCE_AI_PAGE,
     category: ORIGINAL_SOURCE_AI_CATEGORY,
     filters: { selectedObject: selectedObject || null },
+    modelId: selectedModelId || undefined,
   });
 
   const handleInsightFeedback = async (insightId, insightType, feedbackType, comment) => {
@@ -222,13 +235,20 @@ const OrginalSource = ({ routeName }) => {
         useful: feedbackType === "helpful",
         comment: comment || undefined,
       });
-      if (feedbackType === "irrelevant") {
+      const hideForSession =
+        feedbackType === "irrelevant" ||
+        (feedbackType === "not_helpful" && commentImpliesHideInsight(comment));
+      if (hideForSession) {
         setHiddenInsightIds((prev) => {
           const next = prev.includes(insightId) ? prev : [...prev, insightId];
           persistHiddenInsightIds(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY, next);
           return next;
         });
-        toast.success("Hidden for this session. It will stay hidden until you clear insight memory.");
+        toast.success(
+          feedbackType === "not_helpful"
+            ? "Understood — hiding this for your session. It stays hidden after refresh until you clear insight memory."
+            : "Hidden for this session. It will stay hidden until you clear insight memory.",
+        );
       } else if (feedbackType === "not_helpful") {
         toast.success(
           "Saved for this session. Use Refresh insights to regenerate with your changes.",
@@ -241,7 +261,7 @@ const OrginalSource = ({ routeName }) => {
         const idx = match ? Number(match[1]) : -1;
         const kpiTitle = idx >= 0 ? aiResult?.kpis?.[idx]?.title : null;
         if (kpiTitle) {
-          if (feedbackType === "irrelevant") {
+          if (feedbackType === "irrelevant" || (feedbackType === "not_helpful" && commentImpliesHideInsight(comment))) {
             setKpiAction(kpiTitle, "remove");
           } else if (feedbackType === "helpful") {
             setKpiAction(kpiTitle, "add");
@@ -274,7 +294,12 @@ const OrginalSource = ({ routeName }) => {
     }
   };
 
-  const handleRunAnalysis = async (optionalCustomPrompt) => {
+  const handleRunAnalysis = async (optionalCustomPrompt, opts) => {
+    const overrideModelId = opts?.modelId;
+    const effectiveModelId =
+      overrideModelId !== undefined && overrideModelId !== null && String(overrideModelId).trim() !== ""
+        ? String(overrideModelId).trim()
+        : selectedModelId;
     try {
       setAiLoading(true);
       setAiError("");
@@ -282,7 +307,7 @@ const OrginalSource = ({ routeName }) => {
       const customPrompt = (typeof optionalCustomPrompt === "string" ? optionalCustomPrompt : null)?.trim() || undefined;
       const payload = {
         ...buildAiPayload(),
-        modelId: selectedModelId || undefined,
+        modelId: effectiveModelId || undefined,
         customPrompt,
         focusColumns: aiFocusColumns?.length ? aiFocusColumns : undefined,
       };
@@ -387,8 +412,7 @@ const OrginalSource = ({ routeName }) => {
     setKpiTitleActions({});
     try {
       clearHiddenInsightIds(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY);
-      const payload = buildAiPayload();
-      await clearChatSession(payload);
+      await clearChatSession(buildAiPayload());
       await handleRunAnalysis();
       toast.success("Insight memory cleared for this dataset.");
     } catch (error) {
@@ -403,6 +427,45 @@ const OrginalSource = ({ routeName }) => {
       setAiLoading(false);
     } finally {
       setChatLoading(false);
+    }
+  };
+
+  const handleAiModelSwitch = async (nextId) => {
+    if (nextId === selectedModelId) return;
+    setSelectedModelId(nextId);
+    if (!aiDialogOpen) return;
+
+    setChatLoading(true);
+    setAiLoading(true);
+    setChatHistory([]);
+    setChatInput("");
+    setAiResult(null);
+    setAiRequestDebug(null);
+    setAiResponseDebug(null);
+    setAiError("");
+    setHiddenInsightIds([]);
+    setQueuedKpiRequests([]);
+    setKpiTitleActions({});
+    try {
+      clearHiddenInsightIds(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY);
+      await clearChatSession({
+        ...buildAiPayload(),
+        modelId: nextId || undefined,
+      });
+      await handleRunAnalysis(undefined, { modelId: nextId });
+      toast.success("Switched model — insights refreshed for this dataset.");
+    } catch (error) {
+      console.error("AI model switch error:", error);
+      const errBody = error?.response?.data;
+      setAiError(
+        errBody?.detail ||
+          errBody?.message ||
+          error?.message ||
+          "Failed to switch model. Please try again.",
+      );
+    } finally {
+      setChatLoading(false);
+      setAiLoading(false);
     }
   };
 
@@ -577,12 +640,18 @@ const OrginalSource = ({ routeName }) => {
         scroll="paper"
         slotProps={{
           paper: {
-            className: "rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80",
-            sx: { backgroundImage: "linear-gradient(180deg, #fafafa 0%, #ffffff 120px)" },
+            className:
+              "rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80 flex flex-col max-h-[min(90vh,calc(100dvh-48px))]",
+            sx: {
+              backgroundImage: "linear-gradient(180deg, #fafafa 0%, #ffffff 120px)",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            },
           },
         }}
       >
-        <DialogTitle className="!flex !flex-row !items-start !justify-between !gap-3 !pr-2 !pb-3 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 text-white shadow-md">
+        <DialogTitle className="!flex !shrink-0 !flex-row !items-start !justify-between !gap-3 !pr-2 !pb-3 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 text-white shadow-md">
           <div className="flex items-start gap-3 min-w-0">
             <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/15 ring-1 ring-white/25">
               <Sparkles className="text-white" size={22} strokeWidth={1.75} aria-hidden />
@@ -603,16 +672,19 @@ const OrginalSource = ({ routeName }) => {
             <X size={20} />
           </IconButton>
         </DialogTitle>
-        <DialogContent dividers className="!border-slate-200/80 !bg-slate-50/30">
-          {aiModels.length > 0 && (
-            <div className="mb-4 rounded-xl border border-slate-200/90 bg-white px-3 py-3 shadow-sm">
-              <FormControl size="small" sx={{ minWidth: 260 }}>
+        <DialogContent
+          dividers
+          className="!flex !min-h-0 !flex-1 !flex-col !overflow-hidden !border-slate-200/80 !bg-slate-50/30 !p-0"
+        >
+          <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-slate-200/70 bg-slate-50/95 px-3 py-3 shadow-[0_1px_0_rgba(15,23,42,0.06)] backdrop-blur-sm z-[8]">
+            {aiModels.length > 0 && (
+              <FormControl size="small" sx={{ minWidth: 200, flex: "1 1 200px", maxWidth: "100%" }}>
                 <InputLabel id="ai-model-label">Model</InputLabel>
                 <Select
                   labelId="ai-model-label"
                   value={selectedModelId || aiModels[0]?.id || ""}
                   label="Model"
-                  onChange={(e) => setSelectedModelId(e.target.value)}
+                  onChange={(e) => handleAiModelSwitch(e.target.value)}
                 >
                   {aiModels.map((m) => (
                     <MenuItem key={m.id} value={m.id}>
@@ -621,8 +693,51 @@ const OrginalSource = ({ routeName }) => {
                   ))}
                 </Select>
               </FormControl>
+            )}
+            <div className="flex flex-wrap items-center gap-2 min-w-0 sm:ml-auto">
+              <Button
+                variant="contained"
+                size="small"
+                onClick={handleRefreshInsights}
+                disabled={aiLoading}
+                sx={{
+                  borderRadius: "999px",
+                  textTransform: "none",
+                  fontWeight: 600,
+                  px: 1.8,
+                  boxShadow: "none",
+                  background: "linear-gradient(135deg, #7c3aed 0%, #2563eb 100%)",
+                  "&:hover": {
+                    boxShadow: "0 6px 16px rgba(59,130,246,0.28)",
+                  },
+                }}
+              >
+                Refresh insights{queuedKpiRequests.length ? ` (${queuedKpiRequests.length})` : ""}
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={handleClearInsight}
+                disabled={chatLoading && chatHistory.length === 0}
+                sx={{
+                  borderRadius: "999px",
+                  textTransform: "none",
+                  fontWeight: 600,
+                  px: 1.8,
+                  borderColor: "#fecaca",
+                  color: "#b91c1c",
+                  backgroundColor: "#fff1f2",
+                  "&:hover": {
+                    borderColor: "#fca5a5",
+                    backgroundColor: "#ffe4e6",
+                  },
+                }}
+              >
+                Clear memory
+              </Button>
             </div>
-          )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-3 [scrollbar-gutter:stable]">
           {aiError && (
             <div
               className="mb-4 flex gap-3 rounded-xl border border-red-200/90 bg-red-50/95 px-4 py-3 text-sm text-red-900 shadow-sm"
@@ -655,53 +770,11 @@ const OrginalSource = ({ routeName }) => {
               <MessageSquareText className="text-violet-600 shrink-0" size={20} strokeWidth={1.75} aria-hidden />
               <h3 className="font-semibold text-base">Chat with Original Source data</h3>
             </div>
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-              <p className="text-xs text-slate-500 max-w-xl leading-relaxed">
-                Same session as the insights above. Refresh rebuilds the full analysis for all listed jobs.
-              </p>
-              <div className="flex items-center gap-2 shrink-0">
-                <Button
-                  variant="contained"
-                  size="small"
-                  onClick={handleRefreshInsights}
-                  disabled={aiLoading}
-                  sx={{
-                    borderRadius: "999px",
-                    textTransform: "none",
-                    fontWeight: 600,
-                    px: 1.8,
-                    boxShadow: "none",
-                    background: "linear-gradient(135deg, #7c3aed 0%, #2563eb 100%)",
-                    "&:hover": {
-                      boxShadow: "0 6px 16px rgba(59,130,246,0.28)",
-                    },
-                  }}
-                >
-                  Refresh insights{queuedKpiRequests.length ? ` (${queuedKpiRequests.length})` : ""}
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={handleClearInsight}
-                  disabled={chatLoading && chatHistory.length === 0}
-                  sx={{
-                    borderRadius: "999px",
-                    textTransform: "none",
-                    fontWeight: 600,
-                    px: 1.8,
-                    borderColor: "#fecaca",
-                    color: "#b91c1c",
-                    backgroundColor: "#fff1f2",
-                    "&:hover": {
-                      borderColor: "#fca5a5",
-                      backgroundColor: "#ffe4e6",
-                    },
-                  }}
-                >
-                  Clear memory
-                </Button>
-              </div>
-            </div>
+            <p className="text-xs text-slate-500 max-w-2xl leading-relaxed mb-4">
+              Same session as the insights above. Use <span className="font-medium text-slate-600">Refresh insights</span>{" "}
+              above to rebuild analysis for all listed jobs, or <span className="font-medium text-slate-600">Clear memory</span>{" "}
+              to reset chat.
+            </p>
             <div className="min-h-[300px] max-h-[380px] overflow-y-auto rounded-xl border border-slate-200/80 bg-gradient-to-b from-slate-50/90 to-white p-4 mb-3 shadow-inner text-sm [scrollbar-width:thin]">
               {chatHistory.length === 0 && (
                 <div className="text-slate-500 text-sm py-10 text-center px-4 leading-relaxed max-w-md mx-auto">
@@ -791,6 +864,7 @@ const OrginalSource = ({ routeName }) => {
                 Shapes preprocessing and narrative. Session feedback on insight cards is remembered too.
               </p>
             </div>
+          </div>
           </div>
         </DialogContent>
       </Dialog>

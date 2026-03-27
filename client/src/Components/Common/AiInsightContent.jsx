@@ -93,6 +93,7 @@ function InsightFeedbackMenu({ insightId, insightType, onInsightFeedback, anchor
       <IconButton
         size="small"
         onClick={handleOpen}
+        onMouseDown={(e) => e.stopPropagation()}
         aria-label="Insight feedback"
         className="!p-1"
         sx={{ color: "text.secondary" }}
@@ -105,18 +106,47 @@ function InsightFeedbackMenu({ insightId, insightType, onInsightFeedback, anchor
         onClose={handleClose}
         anchorOrigin={{ vertical: anchorVertical, horizontal: anchorHorizontal }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{
+          root: { onClick: (e) => e.stopPropagation() },
+          paper: { onClick: (e) => e.stopPropagation() },
+        }}
       >
-        <MenuItem onClick={() => handleFeedback("helpful")}>{FEEDBACK_TYPES.helpful}</MenuItem>
-        <MenuItem onClick={() => handleFeedback("not_helpful")}>{FEEDBACK_TYPES.not_helpful}</MenuItem>
-        <MenuItem onClick={() => handleFeedback("irrelevant")}>{FEEDBACK_TYPES.irrelevant}</MenuItem>
+        <MenuItem
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            handleFeedback("helpful");
+          }}
+        >
+          {FEEDBACK_TYPES.helpful}
+        </MenuItem>
+        <MenuItem
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            handleFeedback("not_helpful");
+          }}
+        >
+          {FEEDBACK_TYPES.not_helpful}
+        </MenuItem>
+        <MenuItem
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            handleFeedback("irrelevant");
+          }}
+        >
+          {FEEDBACK_TYPES.irrelevant}
+        </MenuItem>
       </Menu>
       <Dialog open={notHelpfulOpen} onClose={() => setNotHelpfulOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Adjust this insight</DialogTitle>
         <DialogContent>
           <p className="text-sm text-gray-600 mb-2">
-            You still want this kind of insight, but with changes. Describe what you want different—the AI remembers
-            this for your session and will apply it when you <strong>Refresh insights</strong> (or run analysis again).
-            This card stays visible until refresh.
+            For a <strong>revised</strong> version of this insight, describe what you want different. The AI remembers
+            this for your session and applies it when you <strong>Refresh insights</strong>. To <strong>hide</strong> the
+            card entirely, use <strong>Irrelevant</strong> in the menu—or write that you don&apos;t need it (e.g. &quot;I
+            don&apos;t need this panel&quot;) and we&apos;ll treat it as hidden after refresh.
           </p>
           <TextField
             autoFocus
@@ -155,7 +185,7 @@ const formatAxisLabel = (value, maxLength = 18) => {
   return `${text.slice(0, maxLength - 1)}...`;
 };
 
-const DRILL_GRID_CAP = 8000;
+const DRILL_GRID_CAP = 50000;
 
 /** Normalize cell values for table display and CSV (no React nodes). */
 const sanitizeRowsForDrill = (rows) => {
@@ -446,14 +476,264 @@ const filterRowsContainingKpiValue = (rows, value) => {
   return out;
 };
 
-/** Infer tracing drill filter from free text (KPIs, trends, cards). */
+/**
+ * Infer import/tracing status drill — strict enough to avoid matching generic English ("matched the schema").
+ */
 const inferTracingDrillCategoryFromText = (text) => {
   const t = String(text || "").toLowerCase();
-  if (/\bpartially\s*matched\b|\bpartial\s+match/.test(t)) return "partiallyMatched";
-  if (/\bdeleted\b/.test(t) && !/\bpartial/.test(t)) return "deleted";
-  if (/\bpending\b|\buntraced\b|\bnull\s*status\b|\buntrace/.test(t)) return "pending";
-  if (/\bmatched\b/.test(t) && !/\bpartial/.test(t)) return "matched";
+  const traceCtx =
+    /\b(import|tracing|trace|traced|untraced|import_status|import status|tracingstatus|tracing status)\b/.test(t) ||
+    /\b(import\s*data\s*tracing|data\s*tracing)\b/.test(t);
+  if (/\bpartially\s*matched\b|\bpartial\s+match\b/.test(t)) return "partiallyMatched";
+  if (/\bdeleted\b/.test(t) && !/\bpartial/.test(t) && traceCtx) return "deleted";
+  if (
+    (/\bpending\b|\buntraced\b|\bnull\s*status\b|\buntrace/.test(t) && traceCtx) ||
+    /\bpending\s*\/\s*untraced\b/.test(t)
+  ) {
+    return "pending";
+  }
+  if (/\bmatched\b/.test(t) && !/\bpartial/.test(t)) {
+    if (/\bmatched\s*:\s*\d/.test(t) || /\d+\s*matched\b/.test(t) || /\bfully\s+matched\b/.test(t) || traceCtx) {
+      return "matched";
+    }
+  }
   return null;
+};
+
+/** Quoted / "top value is …" fragments often name the exact cell values an insight refers to. */
+const extractLikelyValuesFromInsightText = (text) => {
+  const s = String(text || "");
+  const out = [];
+  let m;
+  const r1 = /'([^']{1,120})'/g;
+  while ((m = r1.exec(s))) out.push(m[1].trim());
+  const r2 = /"([^"]{1,120})"/g;
+  while ((m = r2.exec(s))) out.push(m[1].trim());
+  const top = /\btop value is\s+([^.,;\n]{1,80})/i.exec(s);
+  if (top) out.push(top[1].trim());
+  return [...new Set(out.filter((v) => v.length >= 2 && v.length < 200))];
+};
+
+const findGridColumnByPattern = (sampleRow, patternStr) => {
+  if (!sampleRow || typeof sampleRow !== "object") return null;
+  const re = new RegExp(patternStr, "i");
+  for (const col of Object.keys(sampleRow)) {
+    if (re.test(String(col))) return col;
+  }
+  return null;
+};
+
+const parseRowDateMs = (v) => {
+  if (v == null || v === "") return NaN;
+  if (typeof v === "number" && Number.isFinite(v)) {
+    const d = new Date(v > 1e12 ? v : v * 1000);
+    const t = d.getTime();
+    return Number.isNaN(t) ? NaN : t;
+  }
+  const p = Date.parse(String(v));
+  return Number.isNaN(p) ? NaN : p;
+};
+
+const MS_30D = 30 * 24 * 60 * 60 * 1000;
+
+const normalizeAnomalyIssueCode = (raw) => {
+  if (raw == null || raw === "") return "";
+  const s = String(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+  if (s === "sparse_rows") return "sparse_row";
+  return s.replace(/[^a-z0-9_]/g, "");
+};
+
+/** Align row-insight issues with ai-service _detect_anomalies heuristics. */
+const filterRowsForAnomalyIssue = (rows, issueCode) => {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const issue = normalizeAnomalyIssueCode(issueCode);
+  if (!issue || issue === "healthy_rows" || issue === "multi_table_connection") return [];
+
+  const cols = Object.keys(rows[0]);
+
+  if (issue === "missing_purchase") {
+    const col = findGridColumnByPattern(rows[0], "\\b(purchase|order|invoice|cost)\\b");
+    if (!col) return [];
+    return rows.filter((r) => r[col] === "" || r[col] == null);
+  }
+
+  if (issue === "missing_id") {
+    let col = findGridColumnByPattern(rows[0], "\\b(id|device_id|asset_id|record_id|key)\\b");
+    if (!col) col = cols[0];
+    return rows.filter((r) => r[col] === "" || r[col] == null);
+  }
+
+  if (issue === "inactive_device") {
+    const statusCol = findGridColumnByPattern(rows[0], "\\b(status|state|active)\\b");
+    const seenCol = findGridColumnByPattern(
+      rows[0],
+      "last_seen|last activity|last_activity|updated|modified|last_used",
+    );
+    if (!statusCol || !seenCol) return [];
+    const cutoff = Date.now() - MS_30D;
+    const activeSet = new Set(["active", "true", "1", "yes"]);
+    return rows.filter((r) => {
+      const st = String(r[statusCol] ?? "").trim().toLowerCase();
+      if (!activeSet.has(st)) return false;
+      const ms = parseRowDateMs(r[seenCol]);
+      return !Number.isNaN(ms) && ms < cutoff;
+    });
+  }
+
+  if (issue === "sparse_row") {
+    const threshold = Math.max(1, Math.floor(cols.length / 3));
+    return rows.filter((r) => {
+      let nn = 0;
+      for (const k of cols) {
+        const v = r[k];
+        if (v !== "" && v != null) nn++;
+      }
+      return nn < threshold;
+    });
+  }
+
+  return [];
+};
+
+/** KPI row-count tile: same meaning as Total Records — show full job/register rows, not value/text narrowing. */
+const isTotalRecordsKpiTitle = (title) => {
+  const t = String(title || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+  return t === "total records" || t === "total record";
+};
+
+const singularizeKpiToken = (w) => {
+  const t = String(w).toLowerCase();
+  if (t.length > 4 && t.endsWith("ies")) return `${t.slice(0, -3)}y`;
+  if (t.length > 4 && t.endsWith("sses")) return t.slice(0, -2);
+  if (t.length > 4 && t.endsWith("s") && !t.endsWith("ss")) return t.slice(0, -1);
+  return t;
+};
+
+/** Map KPI title phrases (e.g. "application", "publishers") to a grid column. */
+const resolveColumnFromKpiSubjectPhrase = (sampleRow, subjectPhrase) => {
+  if (!sampleRow || !subjectPhrase) return null;
+  const keys = Object.keys(sampleRow);
+  const raw = String(subjectPhrase)
+    .trim()
+    .toLowerCase()
+    .replace(/[\-_]+/g, " ");
+  const tokens = [...new Set(raw.split(/\s+/).map(singularizeKpiToken).filter((x) => x.length >= 2))];
+  if (!tokens.length) return null;
+
+  const scoreKey = (key) => {
+    const kl = String(key).toLowerCase();
+    let s = 0;
+    for (const tok of tokens) {
+      if (tok.length < 3) continue;
+      if (kl === tok) s += 12;
+      else if (kl.includes(tok)) s += 6;
+      else if (tok.includes(kl) && kl.length >= 4) s += 4;
+    }
+    return s;
+  };
+
+  let best = null;
+  let bestScore = 0;
+  for (const k of keys) {
+    const sc = scoreKey(k);
+    if (sc > bestScore) {
+      bestScore = sc;
+      best = k;
+    }
+  }
+  if (bestScore >= 6) return best;
+
+  const sig = tokens.find((t) => t.length >= 3) || tokens[0];
+  if (sig) {
+    const escaped = sig.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const c = findGridColumnByPattern(sampleRow, `\\b${escaped}\\b`);
+    if (c) return c;
+  }
+  return null;
+};
+
+/**
+ * KPI cards from the LLM often use titles like "Distinct Application Count" or "Unique Publishers".
+ * Only used when the user clicked a KPI tile (`isKpiDrill`).
+ */
+const inferKpiMetricDrill = (sampleRow, title) => {
+  if (!sampleRow || !title) return { mode: "none" };
+  const t = String(title)
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+
+  let subject = null;
+  let mode = "none";
+
+  const tryDistinctCount = () => {
+    const patterns = [
+      /^distinct\s+(.+?)\s+count$/,
+      /^number\s+of\s+distinct\s+(.+)$/,
+      /^count\s+of\s+distinct\s+(.+)$/,
+      /^count\s+distinct\s+(.+)$/,
+      /^#\s*of\s+distinct\s+(.+)$/,
+      /^unique\s+(.+?)\s+count$/,
+    ];
+    for (const re of patterns) {
+      const m = t.match(re);
+      if (m) {
+        subject = m[1].trim().replace(/\s+values\s*$/, "");
+        mode = "contributing_rows";
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (!tryDistinctCount()) {
+    const u = t.match(/^unique\s+(.+)$/);
+    if (u && !t.includes("count")) {
+      subject = u[1].trim().replace(/\s+values\s*$/, "");
+      mode = "distinct_value_rows";
+    }
+  }
+
+  if (mode === "none" || !subject) return { mode: "none" };
+
+  subject = subject.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  const col = resolveColumnFromKpiSubjectPhrase(sampleRow, subject);
+  if (!col) return { mode: "none" };
+  return { mode, column: col };
+};
+
+/** Match totalInsight card titles like "Total Records", "total_record" (dedupe vs KPI or duplicate LLM cards). */
+const isTotalRecordsInsightCardTitle = (title) => {
+  const t = String(title || "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ");
+  return t === "total records" || t === "total record";
+};
+
+/** Keep a single Total Records narrative card when there is no KPI; remove all when Total Records KPI exists. */
+const dedupeTotalRecordsInsights = (totalInsights, kpis) => {
+  const raw = Array.isArray(totalInsights) ? totalInsights : [];
+  const hasTotalRecordsKpi = (kpis || []).some((k) => isTotalRecordsKpiTitle(k?.title));
+  if (hasTotalRecordsKpi) {
+    return raw.filter((item) => !isTotalRecordsInsightCardTitle(item?.title));
+  }
+  let kept = false;
+  return raw.filter((item) => {
+    if (!isTotalRecordsInsightCardTitle(item?.title)) return true;
+    if (!kept) {
+      kept = true;
+      return true;
+    }
+    return false;
+  });
 };
 
 const atAGlanceItemText = (item) =>
@@ -810,40 +1090,16 @@ const ChartCard = ({ chart, chartIndex, onInsightFeedback, onDrillDown }) => {
   const insightId = String(chart?.id ?? `chart-${chartIndex ?? 0}`);
   const drillable = typeof onDrillDown === "function";
 
+  const drillPayload = () =>
+    onDrillDown({
+      title: chart.title || chart.id || "Chart",
+      chart,
+      tracingDrillCategory:
+        inferTracingDrillCategoryFromText(`${chart.title || ""} ${chart.id || ""}`) || undefined,
+    });
+
   return (
-    <div
-      role={drillable ? "button" : undefined}
-      tabIndex={drillable ? 0 : undefined}
-      onClick={
-        drillable
-          ? () =>
-              onDrillDown({
-                title: chart.title || chart.id || "Chart",
-                chart,
-                tracingDrillCategory:
-                  inferTracingDrillCategoryFromText(`${chart.title || ""} ${chart.id || ""}`) || undefined,
-              })
-          : undefined
-      }
-      onKeyDown={
-        drillable
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onDrillDown({
-                  title: chart.title || chart.id || "Chart",
-                  chart,
-                  tracingDrillCategory:
-                    inferTracingDrillCategoryFromText(`${chart.title || ""} ${chart.id || ""}`) || undefined,
-                });
-              }
-            }
-          : undefined
-      }
-      className={`border rounded-xl p-5 bg-white space-y-4 shadow-sm min-w-0 overflow-hidden ${
-        drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/70 transition-shadow" : ""
-      }`}
-    >
+    <div className="border rounded-xl p-5 bg-white space-y-4 shadow-sm min-w-0 overflow-hidden">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="font-semibold text-sm text-gray-900 break-words leading-5">
@@ -852,9 +1108,9 @@ const ChartCard = ({ chart, chartIndex, onInsightFeedback, onDrillDown }) => {
           <div className="text-xs text-gray-500 capitalize">{chartType} visualization</div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
-        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-purple-50 text-purple-700">
-          {chartType}
-        </span>
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] bg-purple-50 text-purple-700">
+            {chartType}
+          </span>
           <InsightFeedbackMenu
             insightId={insightId}
             insightType="chart"
@@ -862,13 +1118,32 @@ const ChartCard = ({ chart, chartIndex, onInsightFeedback, onDrillDown }) => {
           />
         </div>
       </div>
-      <div className="rounded-xl bg-gray-50 px-3 py-4">
-        <ChartRenderer chart={chart} height={260} />
+      <div
+        role={drillable ? "button" : undefined}
+        tabIndex={drillable ? 0 : undefined}
+        onClick={drillable ? () => drillPayload() : undefined}
+        onKeyDown={
+          drillable
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  drillPayload();
+                }
+              }
+            : undefined
+        }
+        className={`space-y-3 rounded-xl outline-none ${
+          drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/70 transition-shadow focus-visible:ring-2 focus-visible:ring-violet-400" : ""
+        }`}
+      >
+        <div className="rounded-xl bg-gray-50 px-3 py-4">
+          <ChartRenderer chart={chart} height={260} />
+        </div>
+        <div className="text-xs text-gray-600 break-words leading-5">{getChartHighlight(chart)}</div>
+        {drillable && (
+          <div className="text-[11px] font-medium text-violet-700">Click to view chart values and report data</div>
+        )}
       </div>
-      <div className="text-xs text-gray-600 break-words leading-5">{getChartHighlight(chart)}</div>
-      {drillable && (
-        <div className="text-[11px] font-medium text-violet-700">Click to view chart values and report data</div>
-      )}
     </div>
   );
 };
@@ -900,43 +1175,47 @@ const NarrativeBlock = ({
           return (
             <li
               key={`${title}-${index}`}
-              className={`break-words flex items-start justify-between gap-2 rounded-md -mx-1 px-1 py-0.5 ${
-                drillable ? "cursor-pointer hover:bg-black/5" : ""
-              }`}
-              role={drillable ? "button" : undefined}
-              tabIndex={drillable ? 0 : undefined}
-              onClick={
-                drillable
-                  ? () =>
-                      onDrillDown({
-                        title: `${title} — item ${index + 1}`,
-                        extraHint: item.slice(0, 500),
-                        tracingDrillCategory: inferTracingDrillCategoryFromText(item),
-                      })
-                  : undefined
-              }
-              onKeyDown={
-                drillable
-                  ? (e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
+              className="break-words flex items-start justify-between gap-2 rounded-md -mx-1 px-1 py-0.5"
+            >
+              <span
+                className={`min-w-0 flex-1 ${drillable ? "cursor-pointer rounded px-0.5 -mx-0.5 hover:bg-black/5" : ""}`}
+                role={drillable ? "button" : undefined}
+                tabIndex={drillable ? 0 : undefined}
+                onClick={
+                  drillable
+                    ? () =>
                         onDrillDown({
                           title: `${title} — item ${index + 1}`,
                           extraHint: item.slice(0, 500),
                           tracingDrillCategory: inferTracingDrillCategoryFromText(item),
-                        });
+                        })
+                    : undefined
+                }
+                onKeyDown={
+                  drillable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onDrillDown({
+                            title: `${title} — item ${index + 1}`,
+                            extraHint: item.slice(0, 500),
+                            tracingDrillCategory: inferTracingDrillCategoryFromText(item),
+                          });
+                        }
                       }
-                    }
-                  : undefined
-              }
-            >
-              <span>{item}</span>
-              <InsightFeedbackMenu
-                insightId={insightId}
-                insightType={sectionKey}
-                onInsightFeedback={onInsightFeedback}
-              />
-          </li>
+                    : undefined
+                }
+              >
+                {item}
+              </span>
+              <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+                <InsightFeedbackMenu
+                  insightId={insightId}
+                  insightType={sectionKey}
+                  onInsightFeedback={onInsightFeedback}
+                />
+              </div>
+            </li>
           );
         })}
       </ul>
@@ -949,29 +1228,33 @@ const MaturityCard = ({ maturityScore, onInsightFeedback, onDrillDown, reportRow
   const score = Number(maturityScore.score ?? 0);
   const drillable = typeof onDrillDown === "function" && reportRowsAvailable;
   return (
-    <div
-      role={drillable ? "button" : undefined}
-      tabIndex={drillable ? 0 : undefined}
-      onClick={drillable ? () => onDrillDown({ title: "Maturity / system health", extraHint: maturityScore.comment }) : undefined}
-      onKeyDown={
-        drillable
-          ? (e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onDrillDown({ title: "Maturity / system health", extraHint: maturityScore.comment });
-              }
-            }
-          : undefined
-      }
-      className={`border rounded-xl p-4 bg-gradient-to-r from-purple-50 to-blue-50 shadow-sm min-w-0 overflow-hidden ${
-        drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60" : ""
-      }`}
-    >
+    <div className="border rounded-xl p-4 bg-gradient-to-r from-purple-50 to-blue-50 shadow-sm min-w-0 overflow-hidden">
       <div className="flex items-start justify-between gap-2">
-      <div className="text-sm font-semibold mb-3 text-gray-900">System Health</div>
-        <InsightFeedbackMenu insightId="maturity" insightType="maturity" onInsightFeedback={onInsightFeedback} />
+        <div className="text-sm font-semibold mb-3 text-gray-900">System Health</div>
+        <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+          <InsightFeedbackMenu insightId="maturity" insightType="maturity" onInsightFeedback={onInsightFeedback} />
+        </div>
       </div>
-      <div className="flex items-center gap-3">
+      <div
+        role={drillable ? "button" : undefined}
+        tabIndex={drillable ? 0 : undefined}
+        onClick={
+          drillable ? () => onDrillDown({ title: "Maturity / system health", extraHint: maturityScore.comment }) : undefined
+        }
+        onKeyDown={
+          drillable
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onDrillDown({ title: "Maturity / system health", extraHint: maturityScore.comment });
+                }
+              }
+            : undefined
+        }
+        className={`flex items-center gap-3 rounded-lg outline-none ${
+          drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60 focus-visible:ring-2 focus-visible:ring-violet-400" : ""
+        }`}
+      >
         <div className="w-16 h-16 rounded-full bg-white border border-purple-100 flex items-center justify-center text-xl font-bold text-purple-700 shadow-sm">
           {score}
         </div>
@@ -996,47 +1279,51 @@ const AtAGlanceCard = ({ items, onInsightFeedback, hiddenInsightIds, onDrillDown
           const lineText = atAGlanceItemText(item);
           const traceCat = atAGlanceTracingCategory(item);
           return (
-          <li
-            key={`overview-${index}`}
-              role={drillable ? "button" : undefined}
-              tabIndex={drillable ? 0 : undefined}
-              onClick={
-                drillable
-                  ? () =>
-                      onDrillDown({
-                        title: `Trend / overview — ${index + 1}`,
-                        extraHint: lineText.slice(0, 500),
-                        tracingDrillCategory: traceCat,
-                        allowFullGrid: atAGlanceAllowFullGrid(item),
-                      })
-                  : undefined
-              }
-              onKeyDown={
-                drillable
-                  ? (e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
+            <li
+              key={`overview-${index}`}
+              className="text-sm text-gray-700 leading-6 border-l-4 border-purple-200 pl-3 break-words flex items-start justify-between gap-2 rounded-r-md"
+            >
+              <span
+                className={`min-w-0 flex-1 ${drillable ? "cursor-pointer rounded-r hover:bg-purple-50/50" : ""}`}
+                role={drillable ? "button" : undefined}
+                tabIndex={drillable ? 0 : undefined}
+                onClick={
+                  drillable
+                    ? () =>
                         onDrillDown({
                           title: `Trend / overview — ${index + 1}`,
                           extraHint: lineText.slice(0, 500),
                           tracingDrillCategory: traceCat,
                           allowFullGrid: atAGlanceAllowFullGrid(item),
-                        });
+                        })
+                    : undefined
+                }
+                onKeyDown={
+                  drillable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onDrillDown({
+                            title: `Trend / overview — ${index + 1}`,
+                            extraHint: lineText.slice(0, 500),
+                            tracingDrillCategory: traceCat,
+                            allowFullGrid: atAGlanceAllowFullGrid(item),
+                          });
+                        }
                       }
-                    }
-                  : undefined
-              }
-              className={`text-sm text-gray-700 leading-6 border-l-4 border-purple-200 pl-3 break-words flex items-start justify-between gap-2 rounded-r-md ${
-                drillable ? "cursor-pointer hover:bg-purple-50/50" : ""
-              }`}
-            >
-              <span>{lineText}</span>
-              <InsightFeedbackMenu
-                insightId={insightId}
-                insightType="atAGlance"
-                onInsightFeedback={onInsightFeedback}
-              />
-          </li>
+                    : undefined
+                }
+              >
+                {lineText}
+              </span>
+              <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+                <InsightFeedbackMenu
+                  insightId={insightId}
+                  insightType="atAGlance"
+                  onInsightFeedback={onInsightFeedback}
+                />
+              </div>
+            </li>
           );
         })}
       </ul>
@@ -1077,61 +1364,65 @@ const TotalInsightCards = ({ items, onInsightFeedback, hiddenInsightIds, onDrill
       {items.map((item, index) => {
         const insightId = `totalInsight-${index}`;
         if (hidden.has(insightId)) return null;
-        const blob = `${item.title || ""} ${item.text || item.insight || ""}`;
-        const traceCat = inferTracingDrillCategoryFromText(blob);
         return (
-        <div
-          key={`${item.title || "total"}-${index}`}
-            role={drillable ? "button" : undefined}
-            tabIndex={drillable ? 0 : undefined}
-            onClick={
-              drillable
-                ? () =>
-                    onDrillDown({
-                      title: item.title || `Insight ${index + 1}`,
-                      extraHint: (item.text || item.insight || "").slice(0, 800),
-                      tracingDrillCategory: traceCat || undefined,
-                    })
-                : undefined
-            }
-            onKeyDown={
-              drillable
-                ? (e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      onDrillDown({
-                        title: item.title || `Insight ${index + 1}`,
-                        extraHint: (item.text || item.insight || "").slice(0, 800),
-                        tracingDrillCategory: traceCat || undefined,
-                      });
-                    }
-                  }
-                : undefined
-            }
-            className={`border rounded-xl p-4 bg-white shadow-sm space-y-2 min-w-0 overflow-hidden ${
-              drillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60 transition-shadow" : ""
-            }`}
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="font-semibold text-sm text-gray-900 break-words min-w-0">
-              {item.title || `Insight ${index + 1}`}
-            </div>
-              <div className="flex items-center gap-1 shrink-0">
-            <SeverityBadge severity={item.severity} />
+          <div
+            key={`${item.title || "total"}-${index}`}
+            className="border rounded-xl p-4 bg-white shadow-sm space-y-2 min-w-0 overflow-hidden"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="font-semibold text-sm text-gray-900 break-words min-w-0">
+                {item.title || `Insight ${index + 1}`}
+              </div>
+              <div className="flex items-center gap-1 shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+                <SeverityBadge severity={item.severity} />
                 <InsightFeedbackMenu
                   insightId={insightId}
                   insightType="totalInsight"
                   onInsightFeedback={onInsightFeedback}
                 />
               </div>
+            </div>
+            <div
+              role={drillable ? "button" : undefined}
+              tabIndex={drillable ? 0 : undefined}
+              onClick={
+                drillable
+                  ? () =>
+                      onDrillDown({
+                        title: item.title || `Insight ${index + 1}`,
+                        extraHint: (item.text || item.insight || "").slice(0, 800),
+                        fullDatasetDrill: true,
+                      })
+                  : undefined
+              }
+              onKeyDown={
+                drillable
+                  ? (e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onDrillDown({
+                          title: item.title || `Insight ${index + 1}`,
+                          extraHint: (item.text || item.insight || "").slice(0, 800),
+                          fullDatasetDrill: true,
+                        });
+                      }
+                    }
+                  : undefined
+              }
+              className={`space-y-2 rounded-lg outline-none ${
+                drillable
+                  ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60 transition-shadow focus-visible:ring-2 focus-visible:ring-violet-400"
+                  : ""
+              }`}
+            >
+              <div className="text-sm text-gray-700 leading-6 break-words">
+                {item.text || item.insight}
+              </div>
+              {drillable && (
+                <div className="text-[11px] font-medium text-violet-700 pt-1">Click for underlying data</div>
+              )}
+            </div>
           </div>
-          <div className="text-sm text-gray-700 leading-6 break-words">
-            {item.text || item.insight}
-          </div>
-            {drillable && (
-              <div className="text-[11px] font-medium text-violet-700 pt-1">Click for underlying data</div>
-            )}
-        </div>
         );
       })}
     </div>
@@ -1161,31 +1452,35 @@ const InsightList = ({
               ? item.column || `Column ${index + 1}`
               : item.issue || `Row insight ${index + 1}`;
           return (
-            <div
-              key={`${type}-${item.column || item.issue || "item"}-${index}`}
-              role={drillable ? "button" : undefined}
-              tabIndex={drillable ? 0 : undefined}
-              onClick={
-                drillable
-                  ? () =>
-                      onDrillDown({
-                        title: head,
-                        extraHint: [item.insight || item.text, item.recommendation, item.operational_risk]
-                          .filter(Boolean)
-                          .join(" · ")
-                          .slice(0, 800),
-                        columnInsightKey: type === "column" ? item.column || null : null,
-                        tracingDrillCategory: inferTracingDrillCategoryFromText(
-                          `${item.insight || ""} ${item.text || ""} ${item.issue || ""}`
-                        ),
-                      })
-                  : undefined
-              }
-              onKeyDown={
-                drillable
-                  ? (e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
+            <div key={`${type}-${item.column || item.issue || "item"}-${index}`} className="p-4 space-y-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-semibold text-sm text-gray-900 break-words">
+                    {type === "column"
+                      ? item.column || `Column ${index + 1}`
+                      : item.issue || `Row insight ${index + 1}`}
+                  </div>
+                  <div className="text-[11px] text-gray-500">
+                    {type === "column"
+                      ? "Column-level quality and operational meaning"
+                      : "Row-level issue pattern and operational effect"}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+                  <SeverityBadge severity={item.severity || (type === "row" ? "medium" : "low")} />
+                  <InsightFeedbackMenu
+                    insightId={insightId}
+                    insightType={type === "column" ? "columnInsight" : "rowInsight"}
+                    onInsightFeedback={onInsightFeedback}
+                  />
+                </div>
+              </div>
+              <div
+                role={drillable ? "button" : undefined}
+                tabIndex={drillable ? 0 : undefined}
+                onClick={
+                  drillable
+                    ? () =>
                         onDrillDown({
                           title: head,
                           extraHint: [item.insight || item.text, item.recommendation, item.operational_risk]
@@ -1193,55 +1488,52 @@ const InsightList = ({
                             .join(" · ")
                             .slice(0, 800),
                           columnInsightKey: type === "column" ? item.column || null : null,
-                          tracingDrillCategory: inferTracingDrillCategoryFromText(
-                            `${item.insight || ""} ${item.text || ""} ${item.issue || ""}`
-                          ),
-                        });
+                          rowIssueCode: type === "row" ? item.issue || null : null,
+                        })
+                    : undefined
+                }
+                onKeyDown={
+                  drillable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          onDrillDown({
+                            title: head,
+                            extraHint: [item.insight || item.text, item.recommendation, item.operational_risk]
+                              .filter(Boolean)
+                              .join(" · ")
+                              .slice(0, 800),
+                            columnInsightKey: type === "column" ? item.column || null : null,
+                            rowIssueCode: type === "row" ? item.issue || null : null,
+                          });
+                        }
                       }
-                    }
-                  : undefined
-              }
-              className={`p-4 space-y-2 ${drillable ? "cursor-pointer hover:bg-slate-50/80" : ""}`}
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="font-semibold text-sm text-gray-900 break-words">
-                {type === "column"
-                  ? item.column || `Column ${index + 1}`
-                  : item.issue || `Row insight ${index + 1}`}
-              </div>
-              <div className="text-[11px] text-gray-500">
-                {type === "column"
-                  ? "Column-level quality and operational meaning"
-                  : "Row-level issue pattern and operational effect"}
-              </div>
-            </div>
-                <div className="flex items-center gap-1 shrink-0">
-            <SeverityBadge severity={item.severity || (type === "row" ? "medium" : "low")} />
-                  <InsightFeedbackMenu
-                    insightId={insightId}
-                    insightType={type === "column" ? "columnInsight" : "rowInsight"}
-                    onInsightFeedback={onInsightFeedback}
-                  />
+                    : undefined
+                }
+                className={`space-y-2 rounded-lg outline-none ${
+                  drillable ? "cursor-pointer hover:bg-slate-50/80 focus-visible:ring-2 focus-visible:ring-violet-300/50" : ""
+                }`}
+              >
+                <div className="text-sm text-gray-700 leading-6 break-words">
+                  {item.insight || item.text}
                 </div>
-          </div>
-          <div className="text-sm text-gray-700 leading-6 break-words">
-            {item.insight || item.text}
-          </div>
-          {type === "row" && item.operational_risk && (
-            <div className="text-xs text-red-700 bg-red-50 rounded-md px-3 py-2 leading-5 break-words">
-              {item.operational_risk}
+                {type === "row" && item.operational_risk && (
+                  <div className="text-xs text-red-700 bg-red-50 rounded-md px-3 py-2 leading-5 break-words">
+                    {item.operational_risk}
+                  </div>
+                )}
+                {item.recommendation && (
+                  <div className="text-xs text-blue-700 bg-blue-50 rounded-md px-3 py-2 leading-5 break-words">
+                    {item.recommendation}
+                  </div>
+                )}
+                {drillable && (
+                  <div className="text-[11px] font-medium text-violet-700">
+                    Click for report data behind this insight
+                  </div>
+                )}
+              </div>
             </div>
-          )}
-          {item.recommendation && (
-            <div className="text-xs text-blue-700 bg-blue-50 rounded-md px-3 py-2 leading-5 break-words">
-              {item.recommendation}
-            </div>
-          )}
-              {drillable && (
-                <div className="text-[11px] font-medium text-violet-700">Click for report data behind this insight</div>
-              )}
-        </div>
           );
         })}
       </div>
@@ -1294,6 +1586,7 @@ const insightBlob = (x) => {
 };
 
 const pickImportTracingRelatedInsights = (aiResult) => {
+  const tiDeduped = dedupeTotalRecordsInsights(aiResult?.totalInsights, aiResult?.kpis);
   const pickObjs = (arr, limit) =>
     (Array.isArray(arr) ? arr : [])
       .filter((x) => IMPORT_TRACING_INSIGHT_RE.test(insightBlob(x)))
@@ -1303,7 +1596,7 @@ const pickImportTracingRelatedInsights = (aiResult) => {
       .filter((t) => IMPORT_TRACING_INSIGHT_RE.test(String(t || "")))
       .slice(0, limit);
   return {
-    totalInsights: pickObjs(aiResult?.totalInsights, 10),
+    totalInsights: pickObjs(tiDeduped, 10),
     columnInsights: pickObjs(aiResult?.columnInsights, 10),
     rowInsights: pickObjs(aiResult?.rowInsights, 14),
     risks: pickStr(aiResult?.risks, 10),
@@ -1388,43 +1681,45 @@ const ImportTracingSummaryPanel = ({ tracing, onInsightFeedback, hiddenInsightId
               return (
                 <li
                   key={exId}
-                  role={drillable ? "button" : undefined}
-                  tabIndex={drillable ? 0 : undefined}
-                  onClick={
-                    drillable
-                      ? () =>
-                          onDrillDown({
-                            title: `Import tracing sample #${ex.numberID ?? i}`,
-                            exampleRow: ex,
-                          })
-                      : undefined
-                  }
-                  onKeyDown={
-                    drillable
-                      ? (e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
+                  className="border-l-2 border-purple-200 pl-2 break-all flex items-start justify-between gap-2 rounded"
+                >
+                  <span
+                    className={`min-w-0 flex-1 ${drillable ? "cursor-pointer rounded hover:bg-purple-50/60" : ""}`}
+                    role={drillable ? "button" : undefined}
+                    tabIndex={drillable ? 0 : undefined}
+                    onClick={
+                      drillable
+                        ? () =>
                             onDrillDown({
                               title: `Import tracing sample #${ex.numberID ?? i}`,
                               exampleRow: ex,
-                            });
+                            })
+                        : undefined
+                    }
+                    onKeyDown={
+                      drillable
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              onDrillDown({
+                                title: `Import tracing sample #${ex.numberID ?? i}`,
+                                exampleRow: ex,
+                              });
+                            }
                           }
-                        }
-                      : undefined
-                  }
-                  className={`border-l-2 border-purple-200 pl-2 break-all flex items-start justify-between gap-2 rounded ${
-                    drillable ? "cursor-pointer hover:bg-purple-50/60" : ""
-                  }`}
-                >
-                  <span className="min-w-0">
+                        : undefined
+                    }
+                  >
                     #{ex.numberID ?? i} · {String(ex.TracingStatus ?? "null")} · AC {ex.ACtableName || "—"} / DC{" "}
                     {ex.DCtableName || "—"}
                   </span>
-                  <InsightFeedbackMenu
-                    insightId={exId}
-                    insightType="importTracingExample"
-                    onInsightFeedback={onInsightFeedback}
-                  />
+                  <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+                    <InsightFeedbackMenu
+                      insightId={exId}
+                      insightType="importTracingExample"
+                      onInsightFeedback={onInsightFeedback}
+                    />
+                  </div>
                 </li>
               );
             })}
@@ -1957,6 +2252,8 @@ const AiInsightContent = ({
   hiddenInsightIds,
   pathname = "",
   drillDown = null,
+  /** When true, insight filter chips stay visible while scrolling the insights body (e.g. AI dialog). */
+  stickyInsightFilters = true,
 }) => {
   if (!aiResult) return null;
 
@@ -1990,8 +2287,14 @@ const AiInsightContent = ({
       exampleRow,
       tracingDrillCategory,
       columnInsightKey,
+      /** Backend anomaly `issue` (e.g. missing_purchase) — row insight cards. */
+      rowIssueCode,
       allowFullGrid = false,
       kpiValue,
+      /** True when drill was opened from a KPI tile — enables distinct/unique metric drill from title. */
+      isKpiDrill = false,
+      /** Total-record / overview cards: show all rows for this job or register, not a traced subset. */
+      fullDatasetDrill = false,
     }) => {
       const subtitle = [drillDown?.caption, extraHint].filter(Boolean).join(" · ") || undefined;
       if (drillDown?.loadAllRows) {
@@ -2043,54 +2346,138 @@ const AiInsightContent = ({
       let reportLabel = "";
 
       if (baseRows.length) {
-        const effTracing = tracingDrillCategory || inferTracingDrillCategoryFromText(insightBlob);
-        let effColumn = columnInsightKey;
-        if (!effColumn) {
-          const colHits = findReferencedColumnKeys(insightBlob, Object.keys(baseRows[0]));
-          if (colHits.length) effColumn = colHits[0];
+        if (fullDatasetDrill) {
+          reportSlice = baseRows;
+          reportLabel = drillDown?.loadAllRows
+            ? "All records (this job or register)"
+            : "All records (current table load)";
+        }
+      }
+
+      if (baseRows.length && !reportSlice.length) {
+        if (isKpiDrill) {
+          const metric = inferKpiMetricDrill(baseRows[0], title);
+          if (metric.mode === "contributing_rows" && metric.column) {
+            const acc = metric.column;
+            reportSlice = baseRows.filter((r) => {
+              const v = r[acc];
+              return v !== null && v !== undefined && String(v).trim() !== "";
+            });
+            reportLabel = `Rows with a value in “${acc}” (${reportSlice.length.toLocaleString()}) — base for distinct count`;
+          } else if (metric.mode === "distinct_value_rows" && metric.column) {
+            const acc = metric.column;
+            const seen = new Set();
+            const rowsOut = [];
+            for (const r of baseRows) {
+              const v = r[acc];
+              if (v === null || v === undefined || String(v).trim() === "") continue;
+              const key = String(v).trim().toLowerCase();
+              if (seen.has(key)) continue;
+              seen.add(key);
+              rowsOut.push({ [acc]: v });
+            }
+            rowsOut.sort((a, b) =>
+              String(a[acc]).localeCompare(String(b[acc]), undefined, { sensitivity: "base" }),
+            );
+            reportSlice = rowsOut;
+            reportLabel = `Distinct values — “${acc}” (${rowsOut.length.toLocaleString()})`;
+          }
         }
 
-        const chartTraceRows = chart ? filterRowsMatchingChartTracing(baseRows, chart) : [];
-        if (chartTraceRows.length) {
-          reportSlice = chartTraceRows;
-          const acc = findTracingStatusAccessor(baseRows[0]);
-          reportLabel = `${acc || "Status"} — rows matching chart (${chartTraceRows.length.toLocaleString()})`;
-        } else if (effTracing) {
-          const statusAcc = findTracingStatusAccessor(baseRows[0]);
-          if (!statusAcc) {
-            toast.error(
-              "No import/tracing status column found in the dataset (expected e.g. import_status_update or TracingStatus). Check column names or refresh.",
-            );
-          } else {
-            const traced = filterRowsByTracingCategory(baseRows, effTracing);
-            if (traced.length > 0) {
-              reportSlice = traced;
-              const human =
-                effTracing === "partiallyMatched"
-                  ? "Partially matched"
-                  : effTracing === "pending"
-                    ? "Pending / untraced"
-                    : effTracing.charAt(0).toUpperCase() + effTracing.slice(1);
-              reportLabel = `${statusAcc} — ${human} (${traced.length.toLocaleString()} rows)`;
-            } else {
-              toast.error("No rows match this status filter in the loaded dataset.");
+        const normIssue = normalizeAnomalyIssueCode(rowIssueCode);
+        if (normIssue) {
+          const anomalyRows = filterRowsForAnomalyIssue(baseRows, normIssue);
+          if (anomalyRows.length) {
+            reportSlice = anomalyRows;
+            reportLabel = `Rows — ${normIssue.replace(/_/g, " ")} (${anomalyRows.length.toLocaleString()})`;
+          }
+        }
+
+        if (!reportSlice.length && chart) {
+          const chartTraceRows = filterRowsMatchingChartTracing(baseRows, chart);
+          if (chartTraceRows.length) {
+            reportSlice = chartTraceRows;
+            const acc = findTracingStatusAccessor(baseRows[0]);
+            reportLabel = `${acc || "Status"} — rows matching chart (${chartTraceRows.length.toLocaleString()})`;
+          }
+        }
+
+        if (!reportSlice.length) {
+          let effColumn = columnInsightKey;
+          if (!effColumn) {
+            const colHits = findReferencedColumnKeys(insightBlob, Object.keys(baseRows[0]));
+            if (colHits.length) effColumn = colHits[0];
+          }
+          if (effColumn) {
+            const acc = resolveColumnAccessor(baseRows[0], effColumn);
+            const { rows: colRows, mode } = filterRowsForColumnInsight(baseRows, effColumn);
+            if (mode === "emptyInColumn" && colRows.length) {
+              reportSlice = colRows;
+              reportLabel = `Rows with empty “${effColumn}” (${colRows.length.toLocaleString()})`;
+            } else if (acc) {
+              const quoted = extractLikelyValuesFromInsightText(insightBlob);
+              if (quoted.length) {
+                const valueRows = baseRows.filter((r) => {
+                  const cell = String(r[acc] ?? "").trim();
+                  const cl = cell.toLowerCase();
+                  return quoted.some((q) => {
+                    const ql = String(q).toLowerCase();
+                    return cl === ql || (ql.length >= 2 && cl.includes(ql));
+                  });
+                });
+                if (valueRows.length && valueRows.length < baseRows.length * 0.92) {
+                  reportSlice = valueRows;
+                  reportLabel = `Rows with cited values in “${effColumn}” (${valueRows.length.toLocaleString()})`;
+                }
+              }
+              if (!reportSlice.length) {
+                const narrowed = filterRowsByInsightTextOverlap(
+                  baseRows,
+                  title,
+                  `${extraHint || ""} ${effColumn}`,
+                  [],
+                );
+                if (narrowed.length) {
+                  reportSlice = narrowed;
+                  reportLabel = `Rows matching insight (column “${effColumn}”) (${narrowed.length.toLocaleString()})`;
+                }
+              }
+              if (!reportSlice.length && mode === "noEmpty") {
+                const populated = baseRows.filter((r) => {
+                  const v = r[acc];
+                  return v !== "" && v != null && v !== undefined;
+                });
+                if (populated.length) {
+                  reportSlice = populated;
+                  reportLabel = `Rows with a value in “${effColumn}” (${populated.length.toLocaleString()})`;
+                }
+              }
             }
           }
-        } else if (effColumn) {
-          const { rows: colRows, mode } = filterRowsForColumnInsight(baseRows, effColumn);
-          if (mode === "emptyInColumn" && colRows.length) {
-            reportSlice = colRows;
-            reportLabel = `Rows with empty “${effColumn}” (${colRows.length.toLocaleString()})`;
-          } else {
-            const narrowed = filterRowsByInsightTextOverlap(
-              baseRows,
-              title,
-              `${extraHint || ""} ${effColumn}`,
-              [],
-            );
-            if (narrowed.length) {
-              reportSlice = narrowed;
-              reportLabel = `Rows matching insight (column “${effColumn}”) (${narrowed.length.toLocaleString()})`;
+        }
+
+        if (!reportSlice.length) {
+          const effTracing = tracingDrillCategory || inferTracingDrillCategoryFromText(insightBlob);
+          if (effTracing) {
+            const statusAcc = findTracingStatusAccessor(baseRows[0]);
+            if (!statusAcc) {
+              toast.error(
+                "No import/tracing status column found in the dataset (expected e.g. import_status_update or TracingStatus). Check column names or refresh.",
+              );
+            } else {
+              const traced = filterRowsByTracingCategory(baseRows, effTracing);
+              if (traced.length > 0) {
+                reportSlice = traced;
+                const human =
+                  effTracing === "partiallyMatched"
+                    ? "Partially matched"
+                    : effTracing === "pending"
+                      ? "Pending / untraced"
+                      : effTracing.charAt(0).toUpperCase() + effTracing.slice(1);
+                reportLabel = `${statusAcc} — ${human} (${traced.length.toLocaleString()} rows)`;
+              } else {
+                toast.error("No rows match this status filter in the loaded dataset.");
+              }
             }
           }
         }
@@ -2123,10 +2510,10 @@ const AiInsightContent = ({
             ? "Full dataset (overview line — not narrowed)"
             : "Report data (this page)";
         }
+      }
 
-        if (reportSlice.length > 0) {
-          views.push({ id: "report-grid", label: reportLabel, rows: reportSlice });
-        }
+      if (baseRows.length && reportSlice.length > 0) {
+        views.push({ id: "report-grid", label: reportLabel, rows: reportSlice });
       }
 
       if (!views.length) {
@@ -2273,10 +2660,15 @@ const AiInsightContent = ({
   const columnCharts = filterChartsByScope(aiResult.charts, "column");
   const rowCharts = filterChartsByScope(aiResult.charts, "row");
 
+  const dedupedTotalInsights = useMemo(
+    () => dedupeTotalRecordsInsights(aiResult.totalInsights, aiResult.kpis),
+    [aiResult.totalInsights, aiResult.kpis],
+  );
+
   const atAGlanceItems = useMemo(() => {
     const out = [];
 
-    (aiResult.totalInsights || []).forEach((item) => {
+    dedupedTotalInsights.forEach((item) => {
       const t = item.text || item.insight || "";
       if (!String(t).trim()) return;
       out.push({
@@ -2398,49 +2790,46 @@ const AiInsightContent = ({
     }
 
     return out.filter((x) => Boolean(atAGlanceItemText(x)));
-  }, [aiResult]);
+  }, [aiResult, dedupedTotalInsights]);
   const hidden = new Set(hiddenInsightIds || []);
+
+  const filtersShellClass = stickyInsightFilters
+    ? "sticky top-0 z-[6] rounded-xl border border-violet-200/40 bg-gradient-to-br from-white via-violet-50/95 to-slate-50/95 px-2 py-1.5 sm:px-2.5 sm:py-2 shadow-sm shadow-violet-900/5 ring-1 ring-slate-200/50 min-w-0 w-full overflow-hidden backdrop-blur-sm"
+    : "rounded-xl border border-violet-200/40 bg-gradient-to-br from-white via-violet-50/20 to-slate-50/40 px-2 py-1.5 sm:px-2.5 sm:py-2 shadow-sm shadow-violet-900/5 ring-1 ring-slate-200/50 min-w-0 w-full overflow-hidden";
 
   return (
     <div className="space-y-6 text-gray-900">
-      <div className="rounded-2xl border border-violet-200/40 bg-gradient-to-br from-white via-violet-50/20 to-slate-50/40 backdrop-blur-sm p-3.5 sm:p-4 shadow-md shadow-violet-900/5 ring-1 ring-slate-200/60 min-w-0 overflow-hidden sticky top-0 z-10">
-        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-3">
-          <div className="min-w-0 flex gap-3">
+      <div className={filtersShellClass}>
+        <div className="mb-1.5 flex flex-row flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <span
-              className="hidden sm:flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 text-white shadow-md shadow-violet-500/25"
+              className="hidden h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-600 to-indigo-600 text-white shadow-sm shadow-violet-500/20 sm:flex"
               aria-hidden
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" />
                 <path d="M5 19h14" opacity="0.5" />
               </svg>
             </span>
-            <div>
-              <div className="text-sm font-semibold text-slate-900 tracking-tight">Insight filters</div>
-              <p className="text-xs text-slate-500 mt-0.5 max-w-xl leading-relaxed">
-                Everything shows by default. Tap a section to focus the view; tap again to remove. Use{" "}
-                <span className="font-medium text-violet-800">Show all</span> to reset.
-              </p>
-            </div>
+            <span className="text-xs font-semibold text-slate-900 tracking-tight">Insight filters</span>
           </div>
           {focusedSections.length > 0 && (
             <button
               type="button"
               onClick={clearSectionFocus}
-              className="shrink-0 self-start sm:self-auto px-3.5 py-1.5 rounded-full text-xs font-semibold border border-violet-300/80 bg-white text-violet-900 hover:bg-violet-50 shadow-sm transition-colors"
+              className="shrink-0 rounded-full border border-violet-300/80 bg-white px-2 py-0.5 text-[11px] font-semibold text-violet-900 shadow-sm transition-colors hover:bg-violet-50 whitespace-nowrap"
             >
               Show all sections
             </button>
           )}
         </div>
-        {/* Horizontal chip row (scroll on narrow viewports) — order matches vertical panels below */}
-        <div className="flex flex-row flex-nowrap items-center gap-2 overflow-x-auto pb-1 -mx-0.5 px-0.5 [scrollbar-width:thin]">
+        <div className="flex w-full min-w-0 flex-row flex-nowrap items-center gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:thin] [scrollbar-color:rgba(139,92,246,0.35)_transparent]">
           <button
             type="button"
             onClick={() => toggleSection("kpis")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
               isFilterChipActive("kpis")
-                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                 : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
@@ -2449,9 +2838,9 @@ const AiInsightContent = ({
           <button
             type="button"
             onClick={() => toggleSection("columnInsights")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
               isFilterChipActive("columnInsights")
-                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                 : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
@@ -2460,9 +2849,9 @@ const AiInsightContent = ({
           <button
             type="button"
             onClick={() => toggleSection("rowInsights")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
               isFilterChipActive("rowInsights")
-                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                 : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
@@ -2472,9 +2861,9 @@ const AiInsightContent = ({
             <button
               type="button"
               onClick={() => toggleSection("importDataTracing")}
-              className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+              className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
                 isFilterChipActive("importDataTracing")
-                  ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                  ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                   : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
               }`}
             >
@@ -2485,9 +2874,9 @@ const AiInsightContent = ({
             <button
               type="button"
               onClick={() => toggleSection("registerCompare")}
-              className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+              className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
                 isFilterChipActive("registerCompare")
-                  ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                  ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                   : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
               }`}
             >
@@ -2497,9 +2886,9 @@ const AiInsightContent = ({
           <button
             type="button"
             onClick={() => toggleSection("trends")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
               isFilterChipActive("trends")
-                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                 : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
@@ -2508,9 +2897,9 @@ const AiInsightContent = ({
           <button
             type="button"
             onClick={() => toggleSection("maturity")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
               isFilterChipActive("maturity")
-                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                 : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
@@ -2519,9 +2908,9 @@ const AiInsightContent = ({
           <button
             type="button"
             onClick={() => toggleSection("risks")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
               isFilterChipActive("risks")
-                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                 : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
@@ -2530,9 +2919,9 @@ const AiInsightContent = ({
           <button
             type="button"
             onClick={() => toggleSection("positives")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
               isFilterChipActive("positives")
-                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                 : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
@@ -2541,9 +2930,9 @@ const AiInsightContent = ({
           <button
             type="button"
             onClick={() => toggleSection("recommendations")}
-            className={`shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+            className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-all ${
               isFilterChipActive("recommendations")
-                ? "bg-violet-600 text-white border-violet-500 shadow-md shadow-violet-500/20"
+                ? "bg-violet-600 text-white border-violet-500 shadow-sm shadow-violet-500/15"
                 : "bg-white/90 text-slate-600 border-slate-200 hover:border-violet-200 hover:bg-violet-50/50"
             }`}
           >
@@ -2564,77 +2953,84 @@ const AiInsightContent = ({
                   const insightId = `kpi-${idx}`;
                   if (hidden.has(insightId)) return null;
                   const kpiDrillable = reportRowsAvailable;
+                  const runKpiDrill = () => {
+                    if (!reportRowsAvailable) {
+                      toast.error(
+                        "Open AI insights from a report job or register table (with the grid loaded) to drill into KPI rows.",
+                      );
+                      return;
+                    }
+                    const kpiBlob = `${kpi.title || ""} ${kpi.description || ""} ${kpi.value ?? ""}`;
+                    const totalRecordsKpi = isTotalRecordsKpiTitle(kpi.title);
+                    void openInsightDrillDown({
+                      title: kpi.title || `KPI ${idx + 1}`,
+                      extraHint: [kpi.description, kpi.value !== undefined ? `Value: ${kpi.value}` : ""]
+                        .filter(Boolean)
+                        .join(" · "),
+                      ...(totalRecordsKpi
+                        ? { fullDatasetDrill: true }
+                        : {
+                            isKpiDrill: true,
+                            tracingDrillCategory: inferTracingDrillCategoryFromText(kpiBlob) || undefined,
+                            kpiValue: kpi.value,
+                          }),
+                    });
+                  };
                   return (
                     <li
                       key={insightId}
-                      role={kpiDrillable ? "button" : undefined}
-                      tabIndex={kpiDrillable ? 0 : undefined}
-                      onClick={() => {
-                        if (!reportRowsAvailable) {
-                          toast.error("Open AI insights from a report job or register table (with the grid loaded) to drill into KPI rows.");
-                          return;
-                        }
-                        const kpiBlob = `${kpi.title || ""} ${kpi.description || ""} ${kpi.value ?? ""}`;
-                        void openInsightDrillDown({
-                          title: kpi.title || `KPI ${idx + 1}`,
-                          extraHint: [kpi.description, kpi.value !== undefined ? `Value: ${kpi.value}` : ""]
-                            .filter(Boolean)
-                            .join(" · "),
-                          tracingDrillCategory: inferTracingDrillCategoryFromText(kpiBlob) || undefined,
-                          kpiValue: kpi.value,
-                        });
-                      }}
-                      onKeyDown={
-                        kpiDrillable
-                          ? (e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.preventDefault();
-                                const kpiBlob = `${kpi.title || ""} ${kpi.description || ""} ${kpi.value ?? ""}`;
-                                void openInsightDrillDown({
-                                  title: kpi.title || `KPI ${idx + 1}`,
-                                  extraHint: [kpi.description, kpi.value !== undefined ? `Value: ${kpi.value}` : ""]
-                                    .filter(Boolean)
-                                    .join(" · "),
-                                  tracingDrillCategory: inferTracingDrillCategoryFromText(kpiBlob) || undefined,
-                                  kpiValue: kpi.value,
-                                });
-                              }
-                            }
-                          : undefined
-                      }
-                      className={`border rounded-xl p-3 text-sm bg-white shadow-sm min-h-[110px] hover:shadow-md transition-shadow ${
-                        kpiDrillable ? "cursor-pointer hover:ring-2 hover:ring-violet-300/60" : ""
-                      }`}
+                      className="border rounded-xl p-3 text-sm bg-white shadow-sm min-h-[110px] hover:shadow-md transition-shadow"
                     >
                       <div className="flex items-start justify-between gap-2">
-                  <div className="font-medium text-gray-800">{kpi.title}</div>
-                        <InsightFeedbackMenu
-                          insightId={insightId}
-                          insightType="kpi"
-                          onInsightFeedback={onInsightFeedback}
-                        />
+                        <div className="font-medium text-gray-800">{kpi.title}</div>
+                        <div className="shrink-0" onMouseDown={(e) => e.stopPropagation()}>
+                          <InsightFeedbackMenu
+                            insightId={insightId}
+                            insightType="kpi"
+                            onInsightFeedback={onInsightFeedback}
+                          />
+                        </div>
                       </div>
-                  {kpi.value !== undefined && (
-                    <div className="text-xl font-semibold text-gray-900 mt-1 break-all">
-                      {kpi.value}
-                    </div>
-                  )}
-                  {kpi.description && (
-                    <div className="text-xs text-gray-600 mt-1 leading-5 break-words">
-                      {kpi.description}
-                    </div>
-                  )}
-                      {kpiDrillable && (
-                        <div className="text-[11px] font-medium text-violet-700 pt-1">Click for underlying report data</div>
-                      )}
-                </li>
+                      <div
+                        role={kpiDrillable ? "button" : undefined}
+                        tabIndex={kpiDrillable ? 0 : undefined}
+                        onClick={() => runKpiDrill()}
+                        onKeyDown={
+                          kpiDrillable
+                            ? (e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  runKpiDrill();
+                                }
+                              }
+                            : undefined
+                        }
+                        className={`mt-1 space-y-1 outline-none ${
+                          kpiDrillable
+                            ? "cursor-pointer rounded-lg hover:ring-2 hover:ring-violet-300/60 focus-visible:ring-2 focus-visible:ring-violet-400"
+                            : ""
+                        }`}
+                      >
+                        {kpi.value !== undefined && (
+                          <div className="text-xl font-semibold text-gray-900 break-all">{kpi.value}</div>
+                        )}
+                        {kpi.description && (
+                          <div className="text-xs text-gray-600 leading-5 break-words">{kpi.description}</div>
+                        )}
+                        {kpiDrillable && (
+                          <div className="text-[11px] font-medium text-violet-700 pt-1">
+                            Click for underlying report data
+                          </div>
+                        )}
+                      </div>
+                    </li>
                   );
                 })}
             </ul>
           )}
             {/* KPI/Data overview excludes System Health and At A Glance (moved to dedicated panels). */}
             <TotalInsightCards
-              items={aiResult.totalInsights}
+              items={dedupedTotalInsights}
               onInsightFeedback={onInsightFeedback}
               hiddenInsightIds={hiddenInsightIds}
               onDrillDown={openInsightDrillDown}

@@ -107,9 +107,11 @@ import {
   persistHiddenInsightIds,
   clearHiddenInsightIds,
 } from "../../Utils/aiSessionInsightPrefs";
+import { commentImpliesHideInsight } from "../../Utils/aiInsightFeedback";
 import AiInsightContent from "./AiInsightContent";
 import AiChatAssistantMessage from "./AiChatAssistantMessage";
 import { normalizeKpiTitle } from "../../Utils/aiChatKpiExtract";
+import { resolveAiModelSelection } from "../../Utils/resolveAiModelSelection";
 import toast from "react-hot-toast";
 
 // Column Options Dropdown Component
@@ -958,6 +960,7 @@ const DataTable = ({
   const [queuedKpiRequests, setQueuedKpiRequests] = useState([]);
   const [kpiTitleActions, setKpiTitleActions] = useState({});
   const aiStageTimerRef = useRef(null);
+  const aiOpenFlowBusyRef = useRef(false);
   const aiColumnCandidates = useMemo(
     () =>
       (columns || [])
@@ -976,7 +979,8 @@ const DataTable = ({
     pathname.startsWith("/data-console/reports/by-ar-resource/jobs/") ||
     pathname === "/data-console/register/detailed";
 
-  const AI_INSIGHT_DRILL_MAX = 8000;
+  /** Align with AiInsightContent DRILL_GRID_CAP so job/register drill can load full grids beyond one UI page. */
+  const AI_INSIGHT_DRILL_MAX = 50000;
   const aiInsightDrillDown = useMemo(() => {
     if (!isAiSupportedPage || !Array.isArray(tableData) || tableData.length === 0) return null;
     const total = tableData.length;
@@ -1048,7 +1052,7 @@ const DataTable = ({
         .then((res) => {
           const list = res?.models || [];
           setAiModels(list);
-          if (list.length && !selectedModelId) setSelectedModelId(list[0].id);
+          setSelectedModelId((prev) => resolveAiModelSelection(prev, list));
         })
         .catch(() => setAiModels([]));
     }
@@ -2045,32 +2049,37 @@ const DataTable = ({
   };
 
   const handleOpenAiDialog = async () => {
-    if (!isAiSupportedPage) {
+    if (!isAiSupportedPage || aiOpenFlowBusyRef.current) {
       return;
     }
-    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
-    const category = dashboardData?.tableType || "generic";
-    const basePayload = {
-      orgId: user?.orgId || "default-org",
-      userId: user?.id || "anonymous",
-      pageId,
-      category,
-      filters: buildAiFilters(),
-    };
-    setAiError("");
-    setChatHistory([]);
-    setChatInput("");
-    const persistedHidden = loadHiddenInsightIds(user?.id, pageId, category);
-    setHiddenInsightIds(persistedHidden);
-    setQueuedKpiRequests([]);
-    setKpiTitleActions({});
-    setAiDialogOpen(true);
+    aiOpenFlowBusyRef.current = true;
     try {
-      await clearChatThread(basePayload);
-    } catch (error) {
-      console.error("Failed to reset AI chat thread on Analyze click:", error);
+      const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+      const category = dashboardData?.tableType || "generic";
+      const basePayload = {
+        orgId: user?.orgId || "default-org",
+        userId: user?.id || "anonymous",
+        pageId,
+        category,
+        filters: buildAiFilters(),
+      };
+      setAiError("");
+      setChatHistory([]);
+      setChatInput("");
+      const persistedHidden = loadHiddenInsightIds(user?.id, pageId, category);
+      setHiddenInsightIds(persistedHidden);
+      setQueuedKpiRequests([]);
+      setKpiTitleActions({});
+      setAiDialogOpen(true);
+      try {
+        await clearChatThread(basePayload);
+      } catch (error) {
+        console.error("Failed to reset AI chat thread on Analyze click:", error);
+      }
+      await handleRunAnalysis();
+    } finally {
+      aiOpenFlowBusyRef.current = false;
     }
-    await handleRunAnalysis();
   };
 
   const buildAiFilters = () => ({
@@ -2087,13 +2096,23 @@ const DataTable = ({
 
   const getAiErrorMessage = (error, fallbackMessage) => {
     const errBody = error?.response?.data;
+    const detail = errBody?.detail;
     const rawMessage =
-      errBody?.detail || errBody?.message || error?.message || fallbackMessage;
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((x) => (typeof x === "string" ? x : x?.msg || "")).filter(Boolean).join("; ") ||
+            fallbackMessage
+          : errBody?.message || error?.message || fallbackMessage;
 
-    if (
-      error?.response?.status === 429 ||
-      /RateLimitReached|rate[- ]limit|Too Many Requests/i.test(rawMessage)
-    ) {
+    const status = error?.response?.status;
+    const rateLike =
+      status === 429 ||
+      /\btoo many requests\b/i.test(rawMessage) ||
+      /\brate[\s_-]?limit\b/i.test(rawMessage) ||
+      /RateLimitReached/i.test(rawMessage);
+
+    if (rateLike) {
       return "AI is temporarily busy due to rate limits. Please wait about 1 minute and try again.";
     }
 
@@ -2195,13 +2214,20 @@ const DataTable = ({
         useful: feedbackType === "helpful",
         comment: comment || undefined,
       });
-      if (feedbackType === "irrelevant") {
+      const hideForSession =
+        feedbackType === "irrelevant" ||
+        (feedbackType === "not_helpful" && commentImpliesHideInsight(comment));
+      if (hideForSession) {
         setHiddenInsightIds((prev) => {
           const next = prev.includes(insightId) ? prev : [...prev, insightId];
           persistHiddenInsightIds(user?.id, pageId, category, next);
           return next;
         });
-        toast.success("Hidden for this session. It will stay hidden until you clear insight memory.");
+        toast.success(
+          feedbackType === "not_helpful"
+            ? "Understood — hiding this for your session. It stays hidden after refresh until you clear insight memory."
+            : "Hidden for this session. It will stay hidden until you clear insight memory.",
+        );
       } else if (feedbackType === "not_helpful") {
         toast.success(
           "Saved for this session. Use Refresh insights to regenerate with your changes.",
@@ -2214,7 +2240,7 @@ const DataTable = ({
         const idx = match ? Number(match[1]) : -1;
         const kpiTitle = idx >= 0 ? aiResult?.kpis?.[idx]?.title : null;
         if (kpiTitle) {
-          if (feedbackType === "irrelevant") {
+          if (feedbackType === "irrelevant" || (feedbackType === "not_helpful" && commentImpliesHideInsight(comment))) {
             setKpiAction(kpiTitle, "remove");
           } else if (feedbackType === "helpful") {
             setKpiAction(kpiTitle, "add");
@@ -2226,11 +2252,16 @@ const DataTable = ({
     }
   };
 
-  const handleRunAnalysis = async (optionalCustomPrompt) => {
+  const handleRunAnalysis = async (optionalCustomPrompt, opts) => {
     if (!isAiSupportedPage) {
       setAiError("AI analysis is only available on supported report and register pages.");
       return;
     }
+    const overrideModelId = opts?.modelId;
+    const effectiveModelId =
+      overrideModelId !== undefined && overrideModelId !== null && String(overrideModelId).trim() !== ""
+        ? String(overrideModelId).trim()
+        : selectedModelId;
     try {
       setAiLoading(true);
       setAiError("");
@@ -2243,7 +2274,7 @@ const DataTable = ({
         pageId,
         category: dashboardData?.tableType || "generic",
         filters: buildAiFilters(),
-        modelId: selectedModelId || undefined,
+        modelId: effectiveModelId || undefined,
         customPrompt: (typeof optionalCustomPrompt === "string" ? optionalCustomPrompt : null)?.trim() || undefined,
         focusColumns: aiFocusColumns?.length ? aiFocusColumns : undefined,
       };
@@ -2287,6 +2318,7 @@ const DataTable = ({
       pageId,
       category: dashboardData?.tableType || "generic",
       filters: buildAiFilters(),
+      modelId: selectedModelId || undefined,
       customPrompt: refreshPrompt,
       focusColumns: aiFocusColumns?.length ? aiFocusColumns : undefined,
     };
@@ -2331,6 +2363,7 @@ const DataTable = ({
           pageId,
           category: dashboardData?.tableType || "generic",
           filters: buildAiFilters(),
+          modelId: selectedModelId || undefined,
           customPrompt: refreshPrompt,
           focusColumns: aiFocusColumns?.length ? aiFocusColumns : undefined,
         };
@@ -2379,6 +2412,7 @@ const DataTable = ({
         pageId,
         category,
         filters: buildAiFilters(),
+        modelId: selectedModelId || undefined,
       };
       await clearChatSession(payload);
       await handleRunAnalysis();
@@ -2395,6 +2429,52 @@ const DataTable = ({
       setAiLoading(false);
     } finally {
       setChatLoading(false);
+    }
+  };
+
+  const handleAiModelSwitch = async (nextId) => {
+    if (nextId === selectedModelId) return;
+    setSelectedModelId(nextId);
+    if (!isAiSupportedPage || !aiDialogOpen) return;
+
+    setChatLoading(true);
+    setAiLoading(true);
+    setChatHistory([]);
+    setChatInput("");
+    setAiResult(null);
+    setAiRequestDebug(null);
+    setAiResponseDebug(null);
+    setAiError("");
+    setHiddenInsightIds([]);
+    setQueuedKpiRequests([]);
+    setKpiTitleActions({});
+    try {
+      const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+      const category = dashboardData?.tableType || "generic";
+      clearHiddenInsightIds(user?.id, pageId, category);
+      const payload = {
+        orgId: user?.orgId || "default-org",
+        userId: user?.id || "anonymous",
+        pageId,
+        category,
+        filters: buildAiFilters(),
+        modelId: nextId || undefined,
+      };
+      await clearChatSession(payload);
+      await handleRunAnalysis(undefined, { modelId: nextId });
+      toast.success("Switched model — insights refreshed for this dataset.");
+    } catch (error) {
+      console.error("AI model switch error:", error);
+      const errBody = error?.response?.data;
+      setAiError(
+        errBody?.detail ||
+          errBody?.message ||
+          error?.message ||
+          "Failed to switch model. Please try again.",
+      );
+    } finally {
+      setChatLoading(false);
+      setAiLoading(false);
     }
   };
 
@@ -3154,12 +3234,18 @@ const DataTable = ({
         scroll="paper"
         slotProps={{
           paper: {
-            className: "rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80",
-            sx: { backgroundImage: "linear-gradient(180deg, #fafafa 0%, #ffffff 120px)" },
+            className:
+              "rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80 flex flex-col max-h-[min(90vh,calc(100dvh-48px))]",
+            sx: {
+              backgroundImage: "linear-gradient(180deg, #fafafa 0%, #ffffff 120px)",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+            },
           },
         }}
       >
-        <DialogTitle className="!flex !flex-row !items-start !justify-between !gap-3 !pr-2 !pb-3 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 text-white shadow-md">
+        <DialogTitle className="!flex !shrink-0 !flex-row !items-start !justify-between !gap-3 !pr-2 !pb-3 bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 text-white shadow-md">
           <div className="flex items-start gap-3 min-w-0">
             <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/15 ring-1 ring-white/25">
               <Sparkles className="text-white" size={22} strokeWidth={1.75} aria-hidden />
@@ -3180,16 +3266,19 @@ const DataTable = ({
             <X size={20} />
           </IconButton>
         </DialogTitle>
-        <DialogContent dividers className="!border-slate-200/80 !bg-slate-50/30">
-          {aiModels.length > 0 && (
-            <div className="mb-4 rounded-xl border border-slate-200/90 bg-white px-3 py-3 shadow-sm">
-              <FormControl size="small" sx={{ minWidth: 260 }}>
+        <DialogContent
+          dividers
+          className="!flex !min-h-0 !flex-1 !flex-col !overflow-hidden !border-slate-200/80 !bg-slate-50/30 !p-0"
+        >
+          <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-slate-200/70 bg-slate-50/95 px-3 py-3 shadow-[0_1px_0_rgba(15,23,42,0.06)] backdrop-blur-sm z-[8]">
+            {aiModels.length > 0 && (
+              <FormControl size="small" sx={{ minWidth: 200, flex: "1 1 200px", maxWidth: "100%" }}>
                 <InputLabel id="ai-model-label">Model</InputLabel>
                 <Select
                   labelId="ai-model-label"
                   value={selectedModelId || aiModels[0]?.id || ""}
                   label="Model"
-                  onChange={(e) => setSelectedModelId(e.target.value)}
+                  onChange={(e) => handleAiModelSwitch(e.target.value)}
                 >
                   {aiModels.map((m) => (
                     <MenuItem key={m.id} value={m.id}>
@@ -3198,8 +3287,51 @@ const DataTable = ({
                   ))}
                 </Select>
               </FormControl>
+            )}
+            <div className="flex flex-wrap items-center gap-2 min-w-0 sm:ml-auto">
+              <Button
+                variant="contained"
+                size="small"
+                onClick={handleRefreshInsights}
+                disabled={aiLoading}
+                sx={{
+                  borderRadius: "999px",
+                  textTransform: "none",
+                  fontWeight: 600,
+                  px: 1.8,
+                  boxShadow: "none",
+                  background: "linear-gradient(135deg, #7c3aed 0%, #2563eb 100%)",
+                  "&:hover": {
+                    boxShadow: "0 6px 16px rgba(59,130,246,0.28)",
+                  },
+                }}
+              >
+                Refresh insights{queuedKpiRequests.length ? ` (${queuedKpiRequests.length})` : ""}
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={handleClearInsight}
+                disabled={chatLoading && chatHistory.length === 0}
+                sx={{
+                  borderRadius: "999px",
+                  textTransform: "none",
+                  fontWeight: 600,
+                  px: 1.8,
+                  borderColor: "#fecaca",
+                  color: "#b91c1c",
+                  backgroundColor: "#fff1f2",
+                  "&:hover": {
+                    borderColor: "#fca5a5",
+                    backgroundColor: "#ffe4e6",
+                  },
+                }}
+              >
+                Clear memory
+              </Button>
             </div>
-          )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 py-3 [scrollbar-gutter:stable]">
           {aiError && (
             <div
               className="mb-4 flex gap-3 rounded-xl border border-red-200/90 bg-red-50/95 px-4 py-3 text-sm text-red-900 shadow-sm"
@@ -3232,54 +3364,11 @@ const DataTable = ({
               <MessageSquareText className="text-violet-600 shrink-0" size={20} strokeWidth={1.75} aria-hidden />
               <h3 className="font-semibold text-base">Chat with this data</h3>
             </div>
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-              <p className="text-xs text-slate-500 max-w-xl leading-relaxed">
-                Follow-up questions use the same session context as the insights above. Refresh regenerates the full
-                analysis.
-              </p>
-              <div className="flex items-center gap-2 shrink-0">
-                <Button
-                  variant="contained"
-                  size="small"
-                  onClick={handleRefreshInsights}
-                  disabled={aiLoading}
-                  sx={{
-                    borderRadius: "999px",
-                    textTransform: "none",
-                    fontWeight: 600,
-                    px: 1.8,
-                    boxShadow: "none",
-                    background: "linear-gradient(135deg, #7c3aed 0%, #2563eb 100%)",
-                    "&:hover": {
-                      boxShadow: "0 6px 16px rgba(59,130,246,0.28)",
-                    },
-                  }}
-                >
-                  Refresh insights{queuedKpiRequests.length ? ` (${queuedKpiRequests.length})` : ""}
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={handleClearInsight}
-                  disabled={chatLoading && chatHistory.length === 0}
-                  sx={{
-                    borderRadius: "999px",
-                    textTransform: "none",
-                    fontWeight: 600,
-                    px: 1.8,
-                    borderColor: "#fecaca",
-                    color: "#b91c1c",
-                    backgroundColor: "#fff1f2",
-                    "&:hover": {
-                      borderColor: "#fca5a5",
-                      backgroundColor: "#ffe4e6",
-                    },
-                  }}
-                >
-                  Clear memory
-                </Button>
-              </div>
-            </div>
+            <p className="text-xs text-slate-500 max-w-2xl leading-relaxed mb-4">
+              Follow-up questions use the same session context as the insights above. Use{" "}
+              <span className="font-medium text-slate-600">Refresh insights</span> above to regenerate analysis, or{" "}
+              <span className="font-medium text-slate-600">Clear memory</span> to reset chat for this session.
+            </p>
             <div className="min-h-[300px] max-h-[380px] overflow-y-auto rounded-xl border border-slate-200/80 bg-gradient-to-b from-slate-50/90 to-white p-4 mb-3 shadow-inner text-sm [scrollbar-width:thin]">
               {chatHistory.length === 0 && (
                 <div className="text-slate-500 text-sm py-10 text-center px-4 leading-relaxed max-w-md mx-auto">
@@ -3369,6 +3458,7 @@ const DataTable = ({
                 Shapes preprocessing and insights. Feedback you give on cards is also remembered for this session.
               </p>
             </div>
+          </div>
           </div>
         </DialogContent>
       </Dialog>

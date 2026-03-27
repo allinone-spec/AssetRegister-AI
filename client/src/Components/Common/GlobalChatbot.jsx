@@ -13,6 +13,7 @@ import {
 } from "@mui/material";
 import { MessageCircle, Sparkles, X } from "lucide-react";
 import { clearGlobalChatSession, fetchAiModels, globalChat } from "../../Service/ai.service";
+import { resolveAiModelSelection } from "../../Utils/resolveAiModelSelection";
 import { getRequest } from "../../Service/api.service";
 import { AiChatContextStrip } from "./AiInsightContent";
 
@@ -182,10 +183,7 @@ const GlobalChatbot = () => {
         const list = Array.isArray(res?.models) ? res.models : [];
         if (cancelled) return;
         setAiModels(list);
-        setSelectedModelId((prev) => {
-          if (prev && list.some((m) => m.id === prev)) return prev;
-          return list[0]?.id || "";
-        });
+        setSelectedModelId((prev) => resolveAiModelSelection(prev, list));
       })
       .catch(() => {
         if (!cancelled) setAiModels([]);

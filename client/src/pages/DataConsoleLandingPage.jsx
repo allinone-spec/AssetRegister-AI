@@ -9,6 +9,7 @@ import { analyzeDataset, fetchAiModels, invalidateAnalysisCache } from "../Servi
 import DataConsoleHomeInsights from "../Components/Common/DataConsoleHomeInsights";
 import PageLayout from "../Components/Common/PageLayout";
 import { buildDataConsoleOverviewPayload } from "../Utility/aiConsolePayloads";
+import { resolveAiModelSelection } from "../Utils/resolveAiModelSelection";
 import {
   AR_FONT,
   arCard,
@@ -68,6 +69,7 @@ const DataConsoleWelcomePage = ({ userName = "" }) => {
             pageId: payload.pageId,
             category: payload.category,
             filters: payload.filters,
+            modelId: payload.modelId,
           });
         } catch (e) {
           console.warn("invalidateAnalysisCache (data home):", e);
@@ -95,7 +97,7 @@ const DataConsoleWelcomePage = ({ userName = "" }) => {
       .then((res) => {
         const list = res?.models || [];
         setAiModels(list);
-        if (list.length && !selectedModelId) setSelectedModelId(list[0].id);
+        setSelectedModelId((prev) => resolveAiModelSelection(prev, list));
       })
       .catch(() => setAiModels([]));
   }, []);

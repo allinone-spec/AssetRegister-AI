@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -28,6 +29,11 @@ from app.prompt_defaults import (
     PROMPT_SECTIONS,
 )
 from app.storage import AIStateStore, utc_day_key
+
+# Serialize OpenAI HTTP calls: parallel /analyze + chat completions share one key and trip RPM limits.
+_openai_completion_lock = threading.Lock()
+_openai_last_call_end_monotonic = 0.0
+OPENAI_MIN_INTERVAL_SEC = 2.0
 
 
 class Settings(BaseSettings):
@@ -132,6 +138,7 @@ class ChatSessionRequest(BaseModel):
     pageId: str
     category: str
     filters: Dict[str, Any] = {}
+    modelId: Optional[str] = None
 
 
 class GlobalChatSessionRequest(BaseModel):
@@ -206,14 +213,37 @@ def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": str(exc), "message": f"AI service error: {exc}"})
 
 
+# API model ids are "{slot}::{technical_name}" so Azure deployment and OpenAI model can share
+# the same technical name (e.g. gpt-4o-mini) without breaking clients (duplicate Select values).
+_AI_SLOT_AZURE_PRIMARY = "azure1"
+_AI_SLOT_AZURE_SECONDARY = "azure2"
+_AI_SLOT_OPENAI_PRIMARY = "openai1"
+_AI_SLOT_OPENAI_SECONDARY = "openai2"
+_AI_MODEL_ID_SEP = "::"
+
+
+def _format_ai_model_id(slot: str, technical_name: str) -> str:
+    return f"{slot}{_AI_MODEL_ID_SEP}{technical_name}"
+
+
+def _parse_ai_model_id(model_id: str) -> tuple[Optional[str], str]:
+    """Return (slot_or_none, technical_name_or_legacy_full_id)."""
+    if _AI_MODEL_ID_SEP in model_id:
+        slot, _, rest = model_id.partition(_AI_MODEL_ID_SEP)
+        s = slot.strip()
+        return (s if s else None), rest.strip()
+    return None, model_id.strip()
+
+
 def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
     """Build list of configured AI models from .env (Azure 1, optional Azure 2, optional OpenAI)."""
     models: List[Dict[str, Any]] = []
     if settings.azure_openai_api_key and settings.azure_openai_deployment:
+        dep = settings.azure_openai_deployment
         models.append({
-            "id": settings.azure_openai_deployment,
+            "id": _format_ai_model_id(_AI_SLOT_AZURE_PRIMARY, dep),
             "provider": "azure_openai",
-            "label": f"Azure OpenAI – {settings.azure_openai_deployment}",
+            "label": f"Azure OpenAI – {dep}",
         })
     if (
         getattr(settings, "azure_openai_2_api_key", None)
@@ -222,14 +252,14 @@ def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
     ):
         dep = settings.azure_openai_2_deployment
         models.append({
-            "id": dep,
+            "id": _format_ai_model_id(_AI_SLOT_AZURE_SECONDARY, dep),
             "provider": "azure_openai",
             "label": f"Azure OpenAI (2) – {dep}",
         })
     if getattr(settings, "openai_api_key", None) and getattr(settings, "openai_model", None):
         model = settings.openai_model
         models.append({
-            "id": model,
+            "id": _format_ai_model_id(_AI_SLOT_OPENAI_PRIMARY, model),
             "provider": "openai",
             "label": f"OpenAI – {model}",
         })
@@ -240,7 +270,7 @@ def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
     ):
         m2 = settings.openai_model_2
         models.append({
-            "id": m2,
+            "id": _format_ai_model_id(_AI_SLOT_OPENAI_SECONDARY, m2),
             "provider": "openai",
             "label": f"OpenAI (2) – {m2}",
         })
@@ -256,36 +286,82 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
         model_id = models[0]["id"]
     else:
         model_id = model_id.strip()
-    if model_id == settings.azure_openai_deployment and settings.azure_openai_api_key:
-        return {
-            "provider": "azure_openai",
-            "endpoint": settings.azure_openai_endpoint.rstrip("/"),
-            "deployment": settings.azure_openai_deployment,
-            "api_version": settings.azure_openai_api_version,
-            "api_key": settings.azure_openai_api_key,
-        }
-    dep2 = getattr(settings, "azure_openai_2_deployment", None)
-    if dep2 and model_id == dep2 and getattr(settings, "azure_openai_2_api_key", None):
-        endpoint = (getattr(settings, "azure_openai_2_endpoint") or settings.azure_openai_endpoint or "").rstrip("/")
-        return {
-            "provider": "azure_openai",
-            "endpoint": endpoint,
-            "deployment": dep2,
-            "api_version": getattr(settings, "azure_openai_2_api_version") or "2024-02-15-preview",
-            "api_key": settings.azure_openai_2_api_key,
-        }
-    if getattr(settings, "openai_model", None) and model_id == settings.openai_model and settings.openai_api_key:
-        return {
-            "provider": "openai",
-            "api_key": settings.openai_api_key,
-            "model": settings.openai_model,
-        }
-    if getattr(settings, "openai_model_2", None) and model_id == settings.openai_model_2 and settings.openai_api_key:
-        return {
-            "provider": "openai",
-            "api_key": settings.openai_api_key,
-            "model": settings.openai_model_2,
-        }
+
+    slot, technical = _parse_ai_model_id(model_id)
+
+    if slot == _AI_SLOT_AZURE_PRIMARY:
+        if settings.azure_openai_api_key and technical == settings.azure_openai_deployment:
+            return {
+                "provider": "azure_openai",
+                "endpoint": settings.azure_openai_endpoint.rstrip("/"),
+                "deployment": settings.azure_openai_deployment,
+                "api_version": settings.azure_openai_api_version,
+                "api_key": settings.azure_openai_api_key,
+            }
+    elif slot == _AI_SLOT_AZURE_SECONDARY:
+        dep2 = getattr(settings, "azure_openai_2_deployment", None)
+        if (
+            dep2
+            and technical == dep2
+            and getattr(settings, "azure_openai_2_api_key", None)
+        ):
+            endpoint = (getattr(settings, "azure_openai_2_endpoint") or settings.azure_openai_endpoint or "").rstrip("/")
+            return {
+                "provider": "azure_openai",
+                "endpoint": endpoint,
+                "deployment": dep2,
+                "api_version": getattr(settings, "azure_openai_2_api_version") or "2024-02-15-preview",
+                "api_key": settings.azure_openai_2_api_key,
+            }
+    elif slot == _AI_SLOT_OPENAI_PRIMARY:
+        if getattr(settings, "openai_model", None) and technical == settings.openai_model and settings.openai_api_key:
+            return {
+                "provider": "openai",
+                "api_key": settings.openai_api_key,
+                "model": settings.openai_model,
+            }
+    elif slot == _AI_SLOT_OPENAI_SECONDARY:
+        m2 = getattr(settings, "openai_model_2", None)
+        if m2 and technical == m2 and settings.openai_api_key:
+            return {
+                "provider": "openai",
+                "api_key": settings.openai_api_key,
+                "model": settings.openai_model_2,
+            }
+
+    # Legacy: bare deployment / model name (older clients or manual API calls).
+    if slot is None:
+        if technical == settings.azure_openai_deployment and settings.azure_openai_api_key:
+            return {
+                "provider": "azure_openai",
+                "endpoint": settings.azure_openai_endpoint.rstrip("/"),
+                "deployment": settings.azure_openai_deployment,
+                "api_version": settings.azure_openai_api_version,
+                "api_key": settings.azure_openai_api_key,
+            }
+        dep2 = getattr(settings, "azure_openai_2_deployment", None)
+        if dep2 and technical == dep2 and getattr(settings, "azure_openai_2_api_key", None):
+            endpoint = (getattr(settings, "azure_openai_2_endpoint") or settings.azure_openai_endpoint or "").rstrip("/")
+            return {
+                "provider": "azure_openai",
+                "endpoint": endpoint,
+                "deployment": dep2,
+                "api_version": getattr(settings, "azure_openai_2_api_version") or "2024-02-15-preview",
+                "api_key": settings.azure_openai_2_api_key,
+            }
+        if getattr(settings, "openai_model", None) and technical == settings.openai_model and settings.openai_api_key:
+            return {
+                "provider": "openai",
+                "api_key": settings.openai_api_key,
+                "model": settings.openai_model,
+            }
+        if getattr(settings, "openai_model_2", None) and technical == settings.openai_model_2 and settings.openai_api_key:
+            return {
+                "provider": "openai",
+                "api_key": settings.openai_api_key,
+                "model": settings.openai_model_2,
+            }
+
     raise HTTPException(
         status_code=400,
         detail=f"Unknown or unconfigured model '{model_id}'. Use /api/ai/models to list available models.",
@@ -594,7 +670,11 @@ def _normalize_filters_for_cache(filters: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def _dataset_key(payload: AnalyzeRequest | ChatRequest | ChatSessionRequest) -> str:
+def _dataset_key(
+    payload: AnalyzeRequest | ChatRequest | ChatSessionRequest,
+    *,
+    resolved_model_id: Optional[str] = None,
+) -> str:
     # Bump this to force re-generation when we change prompt structure/context injection.
     analysis_cache_version = "register-tracing-v9-tabular-chat-summary"
     raw = {
@@ -605,6 +685,8 @@ def _dataset_key(payload: AnalyzeRequest | ChatRequest | ChatSessionRequest) -> 
         "filters": _normalize_filters_for_cache(payload.filters or {}),
         "analysisCacheVersion": analysis_cache_version,
     }
+    if resolved_model_id:
+        raw["modelId"] = resolved_model_id
     if hasattr(payload, "customPrompt") and (payload.customPrompt or "").strip():
         raw["customPrompt"] = (payload.customPrompt or "").strip()
     if hasattr(payload, "focusColumns") and payload.focusColumns:
@@ -1783,7 +1865,7 @@ def _default_total_insights(summary: Dict[str, Any], row_health: Dict[str, Any])
     return [
         {
             "title": "Dataset coverage",
-            "text": f"The dataset contains {total_rows} rows across {total_columns} columns, giving a broad view of the current data state.",
+            "text": f"The snapshot includes {total_columns} columns in scope; row volume is summarized under Total Records in KPIs.",
             "severity": "low",
         },
         {
@@ -2168,7 +2250,10 @@ def _llm_chat(
     messages: List[Dict[str, str]],
     max_tokens: int = 2000,
     json_mode: bool = False,
+    *,
+    _skip_openai_429_azure_fallback: bool = False,
 ) -> str:
+    global _openai_last_call_end_monotonic
     cfg = _get_model_config(settings, model_id)
     provider = cfg.get("provider", "azure_openai")
     payload: Dict[str, Any] = {"messages": messages, "temperature": 0.2, "max_tokens": max_tokens}
@@ -2196,27 +2281,84 @@ def _llm_chat(
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
-    for attempt in range(2):
-        try:
-            resp = requests.post(url, headers=headers, json=req_payload, timeout=180)
-        except requests.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"Failed to reach {provider_label}: {exc}") from exc
-        if resp.ok:
-            data = resp.json()
-            return (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
-        if resp.status_code == 429:
-            retry_after = _extract_retry_after_seconds(resp) or 60
-            if attempt == 0 and retry_after <= 10:
-                time.sleep(retry_after)
-                continue
+    is_openai = provider == "openai"
+    # OpenAI: cap 429 backoff so /analyze returns (success or error) instead of hanging the UI for 10+ minutes.
+    max_attempts = 6 if is_openai else 2
+    openai_429_backoff_budget = 100
+    http_timeout = 150 if is_openai else 180
+
+    def _post_chat_completions() -> str:
+        backoff_used = 0
+        for attempt in range(max_attempts):
+            try:
+                resp = requests.post(url, headers=headers, json=req_payload, timeout=http_timeout)
+            except requests.RequestException as exc:
+                raise HTTPException(status_code=502, detail=f"Failed to reach {provider_label}: {exc}") from exc
+            if resp.ok:
+                data = resp.json()
+                return (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
+            if resp.status_code == 429:
+                if attempt < max_attempts - 1:
+                    if is_openai:
+                        budget_left = openai_429_backoff_budget - backoff_used
+                        if budget_left >= 2:
+                            ra = _extract_retry_after_seconds(resp)
+                            if ra is None:
+                                ra = 4 + attempt * 6
+                            wait_s = min(max(int(ra), 2), 24, budget_left)
+                            time.sleep(wait_s)
+                            backoff_used += wait_s
+                            continue
+                    retry_after = _extract_retry_after_seconds(resp) or 60
+                    if attempt == 0 and retry_after <= 10:
+                        time.sleep(retry_after)
+                        continue
+                retry_after = _extract_retry_after_seconds(resp) or 60
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"{provider_label} is temporarily rate-limited. Wait about {retry_after} seconds.",
+                )
             raise HTTPException(
-                status_code=429,
-                detail=f"{provider_label} is temporarily rate-limited. Wait about {retry_after} seconds.",
+                status_code=502,
+                detail=f"{provider_label} returned {resp.status_code}: {resp.text[:500]}",
             )
-        raise HTTPException(
-            status_code=502,
-            detail=f"{provider_label} returned {resp.status_code}: {resp.text[:500]}",
-        )
+        raise HTTPException(status_code=502, detail=f"{provider_label} request failed after {max_attempts} attempts.")
+
+    if is_openai:
+        try:
+            with _openai_completion_lock:
+                now = time.monotonic()
+                gap = OPENAI_MIN_INTERVAL_SEC - (now - _openai_last_call_end_monotonic)
+                if _openai_last_call_end_monotonic > 0.0 and gap > 0:
+                    time.sleep(gap)
+                try:
+                    return _post_chat_completions()
+                finally:
+                    _openai_last_call_end_monotonic = time.monotonic()
+        except HTTPException as exc:
+            if exc.status_code != 429 or _skip_openai_429_azure_fallback:
+                raise
+            azure_ids = [
+                m["id"]
+                for m in _get_ai_models_list(settings)
+                if m.get("provider") == "azure_openai"
+            ]
+            if not azure_ids:
+                raise
+            try:
+                print("[AI] OpenAI rate-limited; using Azure OpenAI for this completion.", flush=True)
+            except Exception:
+                pass
+            return _llm_chat(
+                settings,
+                azure_ids[0],
+                messages,
+                max_tokens,
+                json_mode,
+                _skip_openai_429_azure_fallback=True,
+            )
+
+    return _post_chat_completions()
 
 
 def _parse_ai_json_with_repair(settings: Settings, content: str, model_id: str) -> Dict[str, Any]:
@@ -2751,6 +2893,58 @@ def _build_analysis_user_prompt(
     return base
 
 
+def _strip_redundant_total_rows_kpi(analysis: Dict[str, Any]) -> None:
+    """Remove a KPI titled 'Total Rows' when 'Total Records' is present (same value by default)."""
+    kpis = analysis.get("kpis")
+    if not isinstance(kpis, list) or not kpis:
+        return
+    titles = [str(k.get("title") or "").strip().lower() for k in kpis if isinstance(k, dict)]
+    if "total records" not in titles:
+        return
+    analysis["kpis"] = [
+        k
+        for k in kpis
+        if not (isinstance(k, dict) and str(k.get("title") or "").strip().lower() == "total rows")
+    ]
+
+
+def _normalize_insight_card_title(title: Any) -> str:
+    return " ".join(str(title or "").strip().lower().replace("_", " ").split())
+
+
+def _dedupe_total_records_total_insights(analysis: Dict[str, Any]) -> None:
+    """Remove duplicate Total Records totalInsight cards (KPI already shows row count)."""
+    ti = analysis.get("totalInsights")
+    if not isinstance(ti, list) or not ti:
+        return
+    kpis = analysis.get("kpis") or []
+    has_total_records_kpi = any(
+        isinstance(k, dict)
+        and _normalize_insight_card_title(k.get("title")) in ("total records", "total record")
+        for k in kpis
+    )
+
+    def is_total_records_card(item: Any) -> bool:
+        return isinstance(item, dict) and _normalize_insight_card_title(item.get("title")) in (
+            "total records",
+            "total record",
+        )
+
+    if has_total_records_kpi:
+        analysis["totalInsights"] = [x for x in ti if not is_total_records_card(x)]
+        return
+    out: List[Any] = []
+    kept = False
+    for x in ti:
+        if is_total_records_card(x):
+            if not kept:
+                out.append(x)
+                kept = True
+        else:
+            out.append(x)
+    analysis["totalInsights"] = out
+
+
 def _merge_llm_chunks(base: Dict[str, Any], llm_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     merged = dict(base)
     for key in ["totalInsights", "kpis", "charts", "trends", "risks", "positives", "recommendations", "columnInsights", "rowInsights"]:
@@ -2789,8 +2983,17 @@ def _build_preprocessing_context(
                 and f.get("feedbackType") not in ("not_helpful", "irrelevant")
             )
         ]
-        not_helpful = [f for f in feedback_list if f.get("feedbackType") == "not_helpful"]
-        irrelevant = [f for f in feedback_list if f.get("feedbackType") == "irrelevant"]
+        not_helpful_all = [f for f in feedback_list if f.get("feedbackType") == "not_helpful"]
+        not_helpful = [f for f in not_helpful_all if not _comment_implies_hide_insight(f.get("comment"))]
+        irrelevant = [
+            f
+            for f in feedback_list
+            if f.get("feedbackType") == "irrelevant"
+            or (
+                f.get("feedbackType") == "not_helpful"
+                and _comment_implies_hide_insight(f.get("comment"))
+            )
+        ]
         if helpful:
             parts.append(
                 "USER FEEDBACK - HELPFUL: strong positive signal for this session. Generate deeper, more advanced "
@@ -4123,22 +4326,44 @@ def _maybe_build_register_tracing_context(
     )
 
 
-def _filter_irrelevant_insights(merged: Dict[str, Any], feedback_list: List[Dict[str, Any]]) -> None:
-    """Remove only IRRELEVANT insights from the payload (mutates merged in place).
+def _comment_implies_hide_insight(comment: Any) -> bool:
+    """True when Not helpful text clearly means remove/hide, not revise (aligned with client commentImpliesHideInsight)."""
+    import re
 
-    NOT_HELPFUL is not filtered here: those entries stay visible until refresh, and the next LLM run
-    uses feedback instructions to improve them. Stripping by insightId (e.g. kpi-0) after a refresh
-    would remove the wrong row or leave an empty slot.
+    t = " ".join(str(comment or "").strip().lower().split())
+    if not t:
+        return False
+    patterns = (
+        r"\b(don'?t|do not)\s+need\b",
+        r"\b(don'?t|do not)\s+want\b",
+        r"\bno\s+need\b",
+        r"\bnot\s+needed\b",
+        r"\b(remove|hide|skip|dismiss)\b",
+        r"\bunnecessary\b",
+        r"\buseless\b",
+        r"\b(don'?t|do not)\s+show\b",
+    )
+    return any(re.search(p, t) for p in patterns)
+
+
+def _feedback_hides_insight_row(f: Dict[str, Any]) -> bool:
+    if f.get("feedbackType") == "irrelevant":
+        return True
+    if f.get("feedbackType") == "not_helpful" and _comment_implies_hide_insight(f.get("comment")):
+        return True
+    return False
+
+
+def _filter_irrelevant_insights(merged: Dict[str, Any], feedback_list: List[Dict[str, Any]]) -> None:
+    """Remove insights the user hid (IRRELEVANT, or NOT_HELPFUL with hide-style comment). Mutates merged in place.
+
+    Plain NOT_HELPFUL (revise wording) is not filtered: those stay visible until the model improves them.
     """
-    hidden_ids = {
-        str(f.get("kpiId"))
-        for f in feedback_list
-        if f.get("feedbackType") == "irrelevant"
-    }
+    hidden_ids = {str(f.get("kpiId")) for f in feedback_list if _feedback_hides_insight_row(f)}
     chart_avoid_ids = {
         str(f.get("kpiId"))
         for f in feedback_list
-        if f.get("insightType") == "chart" and f.get("feedbackType") == "irrelevant"
+        if f.get("insightType") == "chart" and _feedback_hides_insight_row(f)
     }
 
     if not hidden_ids and not chart_avoid_ids:
@@ -4199,9 +4424,12 @@ def _analysis_from_rows(
         )
         focus_columns = _get_focus_columns_heuristic(preprocessing_context, df_cols)
     anomalies = _detect_anomalies(df)
+    _analysis_llm_cfg = _get_model_config(settings, model_id)
+    analysis_llm_provider = _analysis_llm_cfg.get("provider", "azure_openai")
     # Token guardrail: for large datasets, anomalies can be huge and blow the context window.
     # We still compute charts/summary from full anomalies, but only send a capped subset to the LLM.
-    max_anomalies_for_llm = 250
+    # OpenAI developer/free tiers: strict RPM/TPM — keep LLM payload small; we collapse to one chunk below.
+    max_anomalies_for_llm = 80 if analysis_llm_provider == "openai" else 250
     anomalies_for_llm: List[Dict[str, Any]] = anomalies
     if len(anomalies) > max_anomalies_for_llm:
         by_issue: Dict[str, List[Dict[str, Any]]] = {}
@@ -4224,10 +4452,13 @@ def _analysis_from_rows(
         custom_prompt, feedback_list or [], chat_messages or []
     )
     llm_chunks: List[Dict[str, Any]] = []
-    chunks = _chunk_list(
-        anomalies_for_llm,
-        50 if len(json.dumps(summary)) < 25000 else 20,
-    )
+    if analysis_llm_provider == "openai":
+        # One completion for the tabular insight pass (plus at most one JSON-repair call). Multi-chunk
+        # analyze was exhausting OpenAI RPM on low tiers even with short sleeps between chunks.
+        chunk_size = max(len(anomalies_for_llm), 1)
+    else:
+        chunk_size = 50 if len(json.dumps(summary)) < 25000 else 20
+    chunks = _chunk_list(anomalies_for_llm, chunk_size)
     for index, chunk in enumerate(chunks, start=1):
         messages = [
             {"role": "system", "content": _analysis_system_prompt(analysis_profile)},
@@ -4250,7 +4481,11 @@ def _analysis_from_rows(
             model_id,
         )
         llm_chunks.append(chunk_result)
+        if analysis_llm_provider == "openai" and index < len(chunks):
+            time.sleep(1.2)
     merged = _merge_llm_chunks(base, llm_chunks)
+    _strip_redundant_total_rows_kpi(merged)
+    _dedupe_total_records_total_insights(merged)
     _filter_irrelevant_insights(merged, feedback_list or [])
     stats_blk = (summary.get("statistics") or {}) if isinstance(summary, dict) else {}
     num_prev = summary.get("numeric_summary") if isinstance(summary, dict) else {}
@@ -4273,7 +4508,7 @@ def _analysis_from_rows(
         "anomalyRows": len(anomalies),
         "chunkCount": len(chunks),
         "model": model_id,
-        "provider": "azure_openai",
+        "provider": analysis_llm_provider,
     }
     if "analysisSummary" not in merged:
         merged["analysisSummary"] = {
@@ -4344,7 +4579,7 @@ def _run_dataset_snapshot_job(
     request: Optional[Request] = None,
 ) -> tuple[List[Dict[str, Any]], bool]:
     day_key = utc_day_key()
-    dataset_key = _dataset_key(payload)
+    dataset_key = _dataset_key(payload, resolved_model_id=None)
     cached_rows = store.get_dataset_snapshot(day_key, dataset_key)
     if cached_rows is not None:
         return cached_rows, True
@@ -4361,7 +4596,7 @@ def _ensure_daily_analysis(
 ) -> Dict[str, Any]:
     model_id = _model_id_or_default(payload.modelId, settings)
     day_key = utc_day_key()
-    analysis_dataset_key = _dataset_key(payload)
+    analysis_dataset_key = _dataset_key(payload, resolved_model_id=model_id)
     session_key = _session_dataset_key(payload)
 
     # Debug: trace what the sidecar is building for Insights.
@@ -4384,6 +4619,8 @@ def _ensure_daily_analysis(
     )
     cached = store.get_cached_analysis(day_key, analysis_dataset_key)
     if cached:
+        _strip_redundant_total_rows_kpi(cached)
+        _dedupe_total_records_total_insights(cached)
         if dbg_page_id in ("admin-console/overview", "data-console/overview"):
             _filter_irrelevant_insights(cached, feedback_list)
             return cached
@@ -4788,15 +5025,17 @@ def clear_chat_thread_only(payload: ChatSessionRequest):
 
 
 @app.post("/api/ai/chat/clear")
-def clear_chat_session(payload: ChatSessionRequest):
+def clear_chat_session(payload: ChatSessionRequest, settings: Settings = Depends(get_settings)):
     _ensure_supported_page_id(payload.pageId)
     store = get_store()
     day_key = utc_day_key()
     session_key = _session_dataset_key(payload)
-    analysis_dataset_key = _dataset_key(payload)
+    model_id = _model_id_or_default(payload.modelId, settings)
+    analysis_dataset_key = _dataset_key(payload, resolved_model_id=model_id)
+    snapshot_key = _dataset_key(payload, resolved_model_id=None)
     store.clear_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
     store.clear_cached_analysis(day_key, analysis_dataset_key)
-    store.clear_dataset_snapshot(day_key, analysis_dataset_key)
+    store.clear_dataset_snapshot(day_key, snapshot_key)
     store.clear_feedback(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
     return {
         "ok": True,
@@ -4859,7 +5098,8 @@ def invalidate_analysis_cache(payload: AnalyzeRequest, settings: Settings = Depe
     _ensure_supported_page_id(payload.pageId)
     store = get_store()
     day_key = utc_day_key()
-    dataset_key = _dataset_key(payload)
+    model_id = _model_id_or_default(payload.modelId, settings)
+    dataset_key = _dataset_key(payload, resolved_model_id=model_id)
     store.clear_cached_analysis(day_key, dataset_key)
     return {"ok": True, "message": "Analysis cache invalidated. Next analyze will re-run."}
 

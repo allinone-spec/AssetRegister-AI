@@ -7,6 +7,9 @@ const AI_BASE_URL =
     ? (import.meta.env.VITE_AI_BASE_URL_LOCAL || "http://localhost:9090/api/ai")
     : (import.meta.env.VITE_AI_BASE_URL_SERVER || "http://localhost:9090/api/ai"));
 
+/** Ceiling for long-running AI routes so the UI does not spin forever if the sidecar hangs. */
+const AI_ANALYZE_TIMEOUT_MS = 900000;
+
 const aiApi = axios.create({
   baseURL: AI_BASE_URL,
 });
@@ -26,7 +29,7 @@ aiApi.interceptors.request.use((config) => {
  * (no direct DB access) and using full, non-paginated data for analysis.
  */
 export const analyzeDataset = async (payload) => {
-  const response = await aiApi.post("/analyze", payload);
+  const response = await aiApi.post("/analyze", payload, { timeout: AI_ANALYZE_TIMEOUT_MS });
   return response.data;
 };
 

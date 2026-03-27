@@ -129,6 +129,8 @@ DEFAULT_TABULAR_ANALYSIS_SYSTEM = (
     "Use concise, decision-oriented language that is specific and actionable. Separate facts from\n"
     "interpretation, label assumptions when you must make them, and focus on quality of insight over\n"
     "quantity. Charts must be dashboard-ready JSON only; do not output markdown or free-form narrative.\n"
+    "The base response already includes a 'Total Records' KPI for row count: do not add a separate KPI titled 'Total Rows',\n"
+    "and do not add a totalInsight card titled 'Total Records' / 'total_record' (same as KPI). Do not restate the raw row count in totalInsights unless the custom prompt requires it.\n"
     "If USER CUSTOM PROMPT explicitly requests additional KPIs/metrics or changes to the KPI list, reflect it in the returned `kpis` array (and adjust `charts` when appropriate).\n\n"
 )
 
