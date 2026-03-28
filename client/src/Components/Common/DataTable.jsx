@@ -3503,6 +3503,7 @@ const DataTable = ({
       <Dialog
         open={aiDialogOpen}
         onClose={() => setAiDialogOpen(false)}
+        disableEnforceFocus
         fullWidth
         maxWidth="lg"
         scroll="paper"
@@ -3554,6 +3555,9 @@ const DataTable = ({
                   value={selectedModelId || aiModels[0]?.id || ""}
                   label="Model"
                   onChange={(e) => handleAiModelSwitch(e.target.value)}
+                  MenuProps={{
+                    sx: { zIndex: 1600 },
+                  }}
                 >
                   {aiModels.map((m) => (
                     <MenuItem key={m.id} value={m.id}>

@@ -104,11 +104,19 @@ function InsightFeedbackMenu({ insightId, insightType, onInsightFeedback, anchor
         anchorEl={anchorEl}
         open={Boolean(anchorEl)}
         onClose={handleClose}
+        disableScrollLock
         anchorOrigin={{ vertical: anchorVertical, horizontal: anchorHorizontal }}
         transformOrigin={{ vertical: "top", horizontal: "right" }}
+        sx={{ zIndex: 1600 }}
         slotProps={{
-          root: { onClick: (e) => e.stopPropagation() },
-          paper: { onClick: (e) => e.stopPropagation() },
+          root: {
+            onClick: (e) => e.stopPropagation(),
+            sx: { zIndex: 1600 },
+          },
+          paper: {
+            onClick: (e) => e.stopPropagation(),
+            sx: { zIndex: 1600 },
+          },
         }}
       >
         <MenuItem
@@ -139,7 +147,14 @@ function InsightFeedbackMenu({ insightId, insightType, onInsightFeedback, anchor
           {FEEDBACK_TYPES.irrelevant}
         </MenuItem>
       </Menu>
-      <Dialog open={notHelpfulOpen} onClose={() => setNotHelpfulOpen(false)} maxWidth="sm" fullWidth>
+      <Dialog
+        open={notHelpfulOpen}
+        onClose={() => setNotHelpfulOpen(false)}
+        maxWidth="sm"
+        fullWidth
+        disableEnforceFocus
+        sx={{ zIndex: 1700 }}
+      >
         <DialogTitle>Adjust this insight</DialogTitle>
         <DialogContent>
           <p className="text-sm text-gray-600 mb-2">
@@ -745,6 +760,9 @@ const atAGlanceTracingCategory = (item) =>
 const atAGlanceAllowFullGrid = (item) =>
   typeof item === "object" && item && item.allowFullGrid === true;
 
+/** Stack above AI insights shell (z-index 1400) and feedback menus (1600). */
+const INSIGHT_DRILL_MODAL_Z = 1800;
+
 /**
  * Drill-down dialog: underlying rows (report grid and/or chart series) + CSV download.
  */
@@ -768,9 +786,11 @@ function InsightDrillDownModal({
       <Dialog
         open={open}
         onClose={onClose}
+        disableEnforceFocus
         maxWidth="sm"
         fullWidth
         scroll="paper"
+        sx={{ zIndex: INSIGHT_DRILL_MODAL_Z }}
         slotProps={{
           paper: { className: "rounded-2xl overflow-hidden border border-violet-100 shadow-xl" },
         }}
@@ -815,9 +835,11 @@ function InsightDrillDownModal({
     <Dialog
       open={open}
       onClose={onClose}
+      disableEnforceFocus
       maxWidth="xl"
       fullWidth
       scroll="paper"
+      sx={{ zIndex: INSIGHT_DRILL_MODAL_Z }}
       slotProps={{
         paper: { className: "rounded-2xl overflow-hidden border border-slate-200/90 shadow-2xl" },
       }}
@@ -3204,8 +3226,10 @@ const AiInsightContent = ({
       <Dialog
         open={Boolean(drillMapNotice)}
         onClose={() => setDrillMapNotice(null)}
+        disableEnforceFocus
         maxWidth="sm"
         fullWidth
+        sx={{ zIndex: INSIGHT_DRILL_MODAL_Z }}
         slotProps={{
           paper: {
             className: "rounded-xl shadow-lg border border-amber-100",
