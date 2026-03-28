@@ -667,7 +667,7 @@ const GlobalChatbot = () => {
           aria-label="Open assistant — cross-console chat"
           title="Open assistant"
           onClick={() => setOpen(true)}
-          className="fixed bottom-6 right-6 z-[1200] group flex items-center gap-2 rounded-full pl-3 pr-1.5 py-1.5 shadow-lg shadow-violet-500/25 bg-gradient-to-r from-violet-600 to-indigo-600 text-white ring-2 ring-white/90 hover:from-violet-500 hover:to-indigo-500 hover:shadow-xl hover:shadow-violet-500/30 focus:outline-none focus-visible:ring-4 focus-visible:ring-violet-300 transition-all"
+          className="fixed bottom-6 right-6 z-[1100] group flex items-center gap-2 rounded-full pl-3 pr-1.5 py-1.5 shadow-lg shadow-violet-500/25 bg-gradient-to-r from-violet-600 to-indigo-600 text-white ring-2 ring-white/90 hover:from-violet-500 hover:to-indigo-500 hover:shadow-xl hover:shadow-violet-500/30 focus:outline-none focus-visible:ring-4 focus-visible:ring-violet-300 transition-all"
         >
           <MessageCircle size={20} strokeWidth={2} className="shrink-0 opacity-95" aria-hidden />
           <span className="text-sm font-semibold pr-1 max-sm:hidden">Assistant</span>
@@ -679,7 +679,7 @@ const GlobalChatbot = () => {
 
       {open && (
         <div
-          className="fixed bottom-6 right-6 z-[1200] w-[420px] max-w-[96vw] h-[min(640px,92vh)] flex flex-col bg-white rounded-2xl border border-slate-200/90 shadow-2xl shadow-slate-900/15 overflow-hidden ring-1 ring-slate-900/5"
+          className="fixed bottom-6 right-6 z-[1100] w-[420px] max-w-[96vw] h-[min(640px,92vh)] flex flex-col bg-white rounded-2xl border border-slate-200/90 shadow-2xl shadow-slate-900/15 overflow-hidden ring-1 ring-slate-900/5"
           role="dialog"
           aria-label="Global assistant"
         >

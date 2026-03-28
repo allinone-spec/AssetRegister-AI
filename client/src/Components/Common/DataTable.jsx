@@ -3506,9 +3506,8 @@ const DataTable = ({
         fullWidth
         maxWidth="lg"
         scroll="paper"
+        sx={{ zIndex: 1400 }}
         slotProps={{
-          root: { sx: { zIndex: 1400 } },
-          backdrop: { sx: { zIndex: 1399 } },
           paper: {
             className:
               "rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80 flex flex-col max-h-[min(90vh,calc(100dvh-48px))]",
