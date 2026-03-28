@@ -200,6 +200,70 @@ const formatAxisLabel = (value, maxLength = 18) => {
   return `${text.slice(0, maxLength - 1)}...`;
 };
 
+/**
+ * xAxis labels may be objects or JSON strings (e.g. permission rows). Recharts legends
+ * use these as slice names — raw JSON overlays the pie. Reduce to a short display string.
+ */
+const normalizeChartCategoryLabel = (raw, index = 0) => {
+  if (raw == null || raw === "") return `Item ${index + 1}`;
+
+  const fromObject = (o) => {
+    if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+    const pick =
+      o.permissionName ??
+      o.name ??
+      o.label ??
+      o.title ??
+      (o.permissionId != null && o.permissionId !== "" ? String(o.permissionId) : null) ??
+      (o.id != null && o.id !== "" ? String(o.id) : null);
+    if (pick != null && typeof pick !== "object") return String(pick);
+    const keys = Object.keys(o);
+    if (keys.length === 1) return String(o[keys[0]]);
+    return null;
+  };
+
+  if (typeof raw === "object") {
+    const s = fromObject(raw);
+    if (s) return formatAxisLabel(s, 32);
+    try {
+      return formatAxisLabel(JSON.stringify(raw), 36);
+    } catch {
+      return `Item ${index + 1}`;
+    }
+  }
+
+  let s = String(raw).trim();
+  if (!s) return `Item ${index + 1}`;
+
+  if (
+    (s.startsWith("{") && s.endsWith("}")) ||
+    (s.startsWith("[") && s.endsWith("]"))
+  ) {
+    try {
+      const parsed = JSON.parse(s);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const inner = fromObject(parsed);
+        if (inner) return formatAxisLabel(inner, 32);
+      }
+      if (Array.isArray(parsed) && parsed.length) {
+        return normalizeChartCategoryLabel(parsed[0], index);
+      }
+    } catch {
+      /* use raw string below */
+    }
+  }
+
+  return formatAxisLabel(s, 36);
+};
+
+const coerceChartNumericValue = (v) => {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "" && !Number.isNaN(Number(v))) return Number(v);
+  if (v && typeof v === "object" && typeof v.value === "number") return v.value;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
 const DRILL_GRID_CAP = 50000;
 
 /** Normalize cell values for table display and CSV (no React nodes). */
@@ -928,8 +992,8 @@ const getChartSeries = (chart) => {
 const buildChartRows = (chart) => {
   const { labels, values } = getChartSeries(chart);
   return labels.map((label, index) => ({
-    label: String(label ?? `Item ${index + 1}`),
-    value: Number(values[index] ?? 0),
+    label: normalizeChartCategoryLabel(label, index),
+    value: coerceChartNumericValue(values[index] ?? 0),
   }));
 };
 
@@ -994,9 +1058,10 @@ const getEffectiveChartType = (chart) => {
 const getChartHighlight = (chart) => {
   const { labels, values, name } = getChartSeries(chart);
   if (!values.length) return "";
-  const maxValue = Math.max(...values);
-  const maxIndex = values.indexOf(maxValue);
-  const topLabel = labels[maxIndex] ?? `Item ${maxIndex + 1}`;
+  const nums = values.map((v) => coerceChartNumericValue(v));
+  const maxValue = Math.max(...nums);
+  const maxIndex = nums.indexOf(maxValue);
+  const topLabel = normalizeChartCategoryLabel(labels[maxIndex], maxIndex);
   return `${name}: highest value is ${topLabel} (${maxValue}).`;
 };
 
@@ -1029,11 +1094,25 @@ const ChartRenderer = ({ chart, height: chartHeight = 260, compact = false }) =>
   const pieOuter = compact ? 44 : 88;
 
   if (chartType === "pie") {
+    const legendStyle = {
+      paddingTop: compact ? 4 : 12,
+      fontSize: compact ? 10 : 12,
+      maxWidth: "100%",
+      maxHeight: compact ? 72 : 96,
+      overflowY: "auto",
+      lineHeight: 1.25,
+    };
     return (
       <ResponsiveContainer width="100%" height={chartHeight}>
         <PieChart>
-          <Tooltip />
-          <Legend wrapperStyle={{ paddingTop: compact ? 4 : 12, fontSize: compact ? 10 : 12 }} />
+          <Tooltip
+            contentStyle={{ maxWidth: 280, wordBreak: "break-word" }}
+            labelFormatter={(label) => formatAxisLabel(String(label ?? ""), 44)}
+          />
+          <Legend
+            wrapperStyle={legendStyle}
+            formatter={(value) => formatAxisLabel(String(value ?? ""), 34)}
+          />
           <Pie
             data={rows}
             dataKey="value"
