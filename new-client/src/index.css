@@ -1,0 +1,164 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Global slim accent scrollbar ── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--accent-rgb), 0.25) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(var(--accent-rgb), 0.25);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--accent-rgb), 0.55);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+@layer utilities {
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Hide scrollbar for IE, Edge and Firefox */
+  .no-scrollbar {
+    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none; /* Firefox */
+  }
+}
+
+/* AI / assistant chrome — follows ThemeContext --accent */
+@layer components {
+  .ai-gradient-header {
+    background: linear-gradient(
+      105deg,
+      var(--accent) 0%,
+      color-mix(in srgb, var(--accent) 68%, #1e1b4b) 100%
+    );
+  }
+  .ai-gradient-fab {
+    background: linear-gradient(
+      105deg,
+      var(--accent) 0%,
+      color-mix(in srgb, var(--accent) 78%, #312e81) 100%
+    );
+    box-shadow: 0 10px 28px rgba(var(--accent-rgb), 0.28);
+  }
+  .ai-gradient-fab:hover {
+    box-shadow: 0 14px 34px rgba(var(--accent-rgb), 0.36);
+  }
+}
+
+@layer base {
+  input:not([type="file"]):not([type="checkbox"]):not([type="radio"]):not(
+      [type="range"]
+    ),
+  select,
+  textarea {
+    background-color: var(--input-bg);
+    color: var(--text-primary);
+  }
+}
+
+.resize-handle-left {
+  transition: background-color 0.15s;
+}
+.resize-handle-left:hover {
+  background-color: var(--accent, #6366f1) !important;
+  opacity: 0.4;
+}
+* {
+  font-family: "DM Sans";
+  .animate-slideIn {
+    animation: slideIn 0.2s ease-out both;
+  }
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideHeaderIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slideIn {
+  animation: slideIn 0.2s ease-out both;
+}
+.animate-slideHeaderIn {
+  animation: slideHeaderIn 0.2s ease-out both;
+}
+
+:root {
+  /* Accent — overridden at runtime by ThemeContext via JS */
+  --accent: #6f2fe1;
+  --accent-rgb: 111, 47, 225;
+
+  /* Surfaces */
+  --page-bg: #f7f5ff;
+  --surface: #ffffff;
+  --card: #ffffff;
+  --nav-bg: #ffffff;
+  --input-bg: #f8f6ff;
+
+  /* Border */
+  --border: rgba(111, 47, 225, 0.12); /* re-computed by JS if accent changes */
+
+  /* Text */
+  --text-primary: #1a1028;
+  --text-sub: #6b7280;
+  --text-faint: #9ca3af;
+
+  /* Shadow */
+  --shadow: 0 2px 16px rgba(111, 47, 225, 0.07);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   DARK MODE  — applied when <html class="dark">
+───────────────────────────────────────────────────────────────────────────── */
+.dark {
+  --page-bg: #0e0e14;
+  --surface: #17171f;
+  --card: #1c1c27;
+  --nav-bg: #13131a;
+  --input-bg: #22222c;
+
+  --border: rgba(111, 47, 225, 0.16);
+
+  --text-primary: #f1f5f9;
+  --text-sub: #94a3b8;
+  --text-faint: #475569;
+
+  --shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
