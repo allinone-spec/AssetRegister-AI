@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
 import requests
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     openai_model_2: Optional[str] = None
     openai_models: Optional[str] = None
     openai_base_url: Optional[str] = None
+    # Google Gemini (google-genai): GEMINI_API_KEY, GEMINI_MODELS (comma-separated model ids)
+    gemini_api_key: Optional[str] = None
+    gemini_models: Optional[str] = None
+    # Anthropic Claude: ANTHROPIC_API_KEY, ANTHROPIC_MODELS
+    anthropic_api_key: Optional[str] = None
+    anthropic_models: Optional[str] = None
     ai_default_analysis_model_id: Optional[str] = None
     ai_default_chat_model_id: Optional[str] = None
     # Comma-separated CORS origins for production (e.g. https://app.example.com)
@@ -109,6 +115,18 @@ def get_settings() -> Settings:
     file_openai_base_url = _read_env_file_value("OPENAI_BASE_URL")
     if file_openai_base_url:
         settings.openai_base_url = file_openai_base_url
+    file_gemini_key = _read_env_file_value("GEMINI_API_KEY")
+    if file_gemini_key:
+        settings.gemini_api_key = file_gemini_key
+    file_gemini_models = _read_env_file_value("GEMINI_MODELS")
+    if file_gemini_models:
+        settings.gemini_models = file_gemini_models
+    file_anthropic_key = _read_env_file_value("ANTHROPIC_API_KEY")
+    if file_anthropic_key:
+        settings.anthropic_api_key = file_anthropic_key
+    file_anthropic_models = _read_env_file_value("ANTHROPIC_MODELS")
+    if file_anthropic_models:
+        settings.anthropic_models = file_anthropic_models
     try:
         runtime_store = AIStateStore(settings.ai_state_db)
         overrides = runtime_store.list_app_settings()
@@ -126,6 +144,10 @@ def get_settings() -> Settings:
         _apply_override("OPENAI_API_KEY", "openai_api_key")
         _apply_override("OPENAI_BASE_URL", "openai_base_url")
         _apply_override("OPENAI_MODELS", "openai_models")
+        _apply_override("GEMINI_API_KEY", "gemini_api_key")
+        _apply_override("GEMINI_MODELS", "gemini_models")
+        _apply_override("ANTHROPIC_API_KEY", "anthropic_api_key")
+        _apply_override("ANTHROPIC_MODELS", "anthropic_models")
         _apply_override("AI_DEFAULT_ANALYSIS_MODEL_ID", "ai_default_analysis_model_id")
         _apply_override("AI_DEFAULT_CHAT_MODEL_ID", "ai_default_chat_model_id")
     except Exception:
@@ -228,6 +250,39 @@ class PromptConfigSection(BaseModel):
     value: str
     isCustom: bool
     defaultText: str
+    # When orgId+userId are passed to GET /prompt-config: user-specific layer
+    userPrompt: Optional[str] = None
+    effectiveSource: Optional[str] = None  # "user" | "admin" | "default"
+
+
+class UserPromptConfigUpdateRequest(BaseModel):
+    orgId: str
+    userId: str
+    prompts: Dict[str, Optional[str]] = Field(default_factory=dict)
+
+
+class UserApiKeysGetResponse(BaseModel):
+    orgId: str
+    userId: str
+    providers: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+
+class UserApiKeysUpdateRequest(BaseModel):
+    orgId: str
+    userId: str
+    azureOpenAiApiKey: Optional[str] = None
+    openAiApiKey: Optional[str] = None
+    geminiApiKey: Optional[str] = None
+    anthropicApiKey: Optional[str] = None
+    clearAzureOpenAiApiKey: Optional[bool] = None
+    clearOpenAiApiKey: Optional[bool] = None
+    clearGeminiApiKey: Optional[bool] = None
+    clearAnthropicApiKey: Optional[bool] = None
+
+
+class UserApiKeysClearRequest(BaseModel):
+    orgId: str
+    userId: str
 
 
 class PromptConfigResponse(BaseModel):
@@ -241,15 +296,22 @@ class PromptConfigUpdateRequest(BaseModel):
 
 
 class AIAdminSettingsResponse(BaseModel):
-    azureOpenAiApiKey: str = ""
-    openAiApiKey: str = ""
+    # Plaintext API keys are never returned; use masked + has* flags.
     azureOpenAiApiKeyMasked: str = ""
     openAiApiKeyMasked: str = ""
+    geminiApiKeyMasked: str = ""
+    anthropicApiKeyMasked: str = ""
+    hasAzureOpenAiApiKey: bool = False
+    hasOpenAiApiKey: bool = False
+    hasGeminiApiKey: bool = False
+    hasAnthropicApiKey: bool = False
     azureOpenAiEndpoint: str = ""
     azureOpenAiApiVersion: str = ""
     openAiBaseUrl: str = ""
     azureDeployments: List[str] = Field(default_factory=list)
     openAiModels: List[str] = Field(default_factory=list)
+    geminiModels: List[str] = Field(default_factory=list)
+    anthropicModels: List[str] = Field(default_factory=list)
     defaultAnalysisModelId: Optional[str] = None
     defaultChatModelId: Optional[str] = None
     models: List[Dict[str, Any]] = Field(default_factory=list)
@@ -258,11 +320,19 @@ class AIAdminSettingsResponse(BaseModel):
 class AIAdminSettingsUpdateRequest(BaseModel):
     azureOpenAiApiKey: Optional[str] = None
     openAiApiKey: Optional[str] = None
+    geminiApiKey: Optional[str] = None
+    anthropicApiKey: Optional[str] = None
+    clearAzureOpenAiApiKey: Optional[bool] = None
+    clearOpenAiApiKey: Optional[bool] = None
+    clearGeminiApiKey: Optional[bool] = None
+    clearAnthropicApiKey: Optional[bool] = None
     azureOpenAiEndpoint: Optional[str] = None
     azureOpenAiApiVersion: Optional[str] = None
     openAiBaseUrl: Optional[str] = None
     azureDeployments: Optional[List[str]] = None
     openAiModels: Optional[List[str]] = None
+    geminiModels: Optional[List[str]] = None
+    anthropicModels: Optional[List[str]] = None
     defaultAnalysisModelId: Optional[str] = None
     defaultChatModelId: Optional[str] = None
 
@@ -272,11 +342,47 @@ app = FastAPI(title="AssetRegister AI Sidecar", version="1.0.0")
 _MAX_APP_PROMPT_CHARS = 60000
 
 
-def _resolve_app_prompt(prompt_key: str) -> str:
+def _resolve_app_prompt(
+    prompt_key: str,
+    org_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> str:
+    if org_id and user_id:
+        u = get_store().get_user_prompt(org_id, user_id, prompt_key)
+        if u is not None and str(u).strip():
+            return str(u).strip()
     raw = get_store().get_app_prompt(prompt_key)
     if raw is not None and str(raw).strip():
         return str(raw).strip()
     return (PROMPT_DEFAULTS.get(prompt_key) or "").strip()
+
+
+def _effective_settings_for_ai(
+    settings: Settings,
+    org_id: Optional[str],
+    user_id: Optional[str],
+) -> Settings:
+    """Apply per-user API key overrides when present (decrypted server-side only)."""
+    if not org_id or not user_id:
+        return settings
+    store = get_store()
+    pairs = [
+        ("azure_openai", "azure_openai_api_key"),
+        ("openai", "openai_api_key"),
+        ("gemini", "gemini_api_key"),
+        ("anthropic", "anthropic_api_key"),
+    ]
+    updates: Dict[str, Any] = {}
+    for prov, attr in pairs:
+        pt = store.get_user_api_key_plaintext(org_id, user_id, prov)
+        if pt:
+            updates[attr] = pt
+    if not updates:
+        return settings
+    try:
+        return settings.model_copy(update=updates)
+    except Exception:
+        return settings
 
 
 def _cors_origins_list(origins_str: str) -> List[str]:
@@ -370,6 +476,14 @@ def _configured_openai_models(settings: Settings) -> List[str]:
     return _unique_keep_order(values)
 
 
+def _configured_gemini_models(settings: Settings) -> List[str]:
+    return _unique_keep_order(_split_csv_values(getattr(settings, "gemini_models", None)))
+
+
+def _configured_anthropic_models(settings: Settings) -> List[str]:
+    return _unique_keep_order(_split_csv_values(getattr(settings, "anthropic_models", None)))
+
+
 def _mask_secret(secret: Optional[str]) -> str:
     s = str(secret or "").strip()
     if not s:
@@ -401,6 +515,22 @@ def _get_ai_models_list(settings: Settings) -> List[Dict[str, Any]]:
                 "id": _format_ai_model_id("openai", model),
                 "provider": "openai",
                 "label": f"OpenAI - {model}",
+            })
+    gemini_models = _configured_gemini_models(settings)
+    if settings.gemini_api_key and gemini_models:
+        for model in gemini_models:
+            models.append({
+                "id": _format_ai_model_id("gemini", model),
+                "provider": "gemini",
+                "label": f"Google Gemini - {model}",
+            })
+    anthropic_models = _configured_anthropic_models(settings)
+    if settings.anthropic_api_key and anthropic_models:
+        for model in anthropic_models:
+            models.append({
+                "id": _format_ai_model_id("anthropic", model),
+                "provider": "anthropic",
+                "label": f"Anthropic Claude - {model}",
             })
     # Remove duplicates by id while preserving first occurrence.
     deduped: List[Dict[str, Any]] = []
@@ -444,6 +574,8 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
 
     azure_deployments = _configured_azure_deployments(settings)
     openai_models = _configured_openai_models(settings)
+    gemini_models = _configured_gemini_models(settings)
+    anthropic_models = _configured_anthropic_models(settings)
 
     if slot == "azure":
         if settings.azure_openai_api_key and technical in azure_deployments:
@@ -459,6 +591,20 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
             return {
                 "provider": "openai",
                 "api_key": settings.openai_api_key,
+                "model": technical,
+            }
+    elif slot == "gemini":
+        if settings.gemini_api_key and technical in gemini_models:
+            return {
+                "provider": "gemini",
+                "api_key": settings.gemini_api_key,
+                "model": technical,
+            }
+    elif slot == "anthropic":
+        if settings.anthropic_api_key and technical in anthropic_models:
+            return {
+                "provider": "anthropic",
+                "api_key": settings.anthropic_api_key,
                 "model": technical,
             }
     elif slot in (_AI_SLOT_AZURE_PRIMARY, _AI_SLOT_AZURE_SECONDARY):
@@ -504,6 +650,18 @@ def _get_model_config(settings: Settings, model_id: str) -> Dict[str, Any]:
             return {
                 "provider": "openai",
                 "api_key": settings.openai_api_key,
+                "model": technical,
+            }
+        if settings.gemini_api_key and technical in gemini_models:
+            return {
+                "provider": "gemini",
+                "api_key": settings.gemini_api_key,
+                "model": technical,
+            }
+        if settings.anthropic_api_key and technical in anthropic_models:
+            return {
+                "provider": "anthropic",
+                "api_key": settings.anthropic_api_key,
                 "model": technical,
             }
 
@@ -1772,8 +1930,11 @@ def _llm_admin_console_highlights(
     model_id: str,
     metrics: Dict[str, Any],
     extra_context: str,
+    org_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    system = _resolve_app_prompt(KEY_ADMIN_CONSOLE_INSIGHTS)
+    eff = _effective_settings_for_ai(settings, org_id, user_id)
+    system = _resolve_app_prompt(KEY_ADMIN_CONSOLE_INSIGHTS, org_id=org_id, user_id=user_id)
     user = "METRICS (authoritative numbers):\n" + json.dumps(metrics, indent=2, default=str)
     if (extra_context or "").strip():
         user += "\n\nSESSION / USER CONTEXT:\n" + (extra_context or "").strip()[:8000]
@@ -1781,9 +1942,9 @@ def _llm_admin_console_highlights(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
-    raw = _llm_chat(settings, model_id, messages, max_tokens=1600, json_mode=True)
+    raw = _llm_chat(eff, model_id, messages, max_tokens=1600, json_mode=True)
     try:
-        return _parse_ai_json_with_repair(settings, raw, model_id)
+        return _parse_ai_json_with_repair(eff, raw, model_id)
     except Exception:
         return {
             "executiveSummary": "Admin Console metrics were computed; narrative JSON could not be parsed.",
@@ -1820,7 +1981,9 @@ def _build_admin_console_overview_response(
 
     custom = (payload.customPrompt or "").strip()
     fb_context = _build_preprocessing_context(custom, feedback_list, chat_messages, persistent_user_memory_text)
-    highlights = _llm_admin_console_highlights(settings, model_id, metrics, fb_context)
+    highlights = _llm_admin_console_highlights(
+        settings, model_id, metrics, fb_context, org_id=payload.orgId, user_id=payload.userId
+    )
 
     total_insights: List[Dict[str, Any]] = []
     es = (highlights.get("executiveSummary") or "").strip()
@@ -2105,19 +2268,20 @@ def _build_data_console_home_response(
 
     custom = (payload.customPrompt or "").strip()
     fb_context = _build_preprocessing_context(custom, feedback_list, chat_messages, persistent_user_memory_text)
-    system = _resolve_app_prompt(KEY_DATA_CONSOLE_INSIGHTS)
+    eff = _effective_settings_for_ai(settings, payload.orgId, payload.userId)
+    system = _resolve_app_prompt(KEY_DATA_CONSOLE_INSIGHTS, org_id=payload.orgId, user_id=payload.userId)
     user = "METRICS:\n" + json.dumps(metrics, indent=2, default=str)
     if fb_context.strip():
         user += "\n\nCONTEXT:\n" + fb_context[:8000]
     raw = _llm_chat(
-        settings,
+        eff,
         model_id,
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         max_tokens=1600,
         json_mode=True,
     )
     try:
-        highlights = _parse_ai_json_with_repair(settings, raw, model_id)
+        highlights = _parse_ai_json_with_repair(eff, raw, model_id)
     except Exception:
         highlights = {
             "executiveSummary": "Data Console metrics computed; narrative unavailable.",
@@ -2866,6 +3030,106 @@ def _llm_chat_payload_for_openai(model: str, base_payload: Dict[str, Any], json_
     return out
 
 
+def _llm_gemini_generate(
+    api_key: str,
+    model_name: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    json_mode: bool,
+) -> str:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+    system_parts: List[str] = []
+    contents: List[Any] = []
+    for m in messages:
+        role = (m.get("role") or "user").strip()
+        content = m.get("content") or ""
+        if role == "system":
+            system_parts.append(content)
+        elif role == "user":
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=content)]))
+        elif role == "assistant":
+            contents.append(types.Content(role="model", parts=[types.Part.from_text(text=content)]))
+        else:
+            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=content)]))
+    if not contents:
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text="")]))
+    sys_instr = "\n\n".join(system_parts) if system_parts else None
+    cap = OPENAI_MAX_OUTPUT_TOKENS_JSON if json_mode else OPENAI_MAX_OUTPUT_TOKENS_NON_JSON
+    try:
+        mt = max(64, min(int(max_tokens), cap))
+    except Exception:
+        mt = cap
+    cfg_kwargs: Dict[str, Any] = {
+        "temperature": 0.2,
+        "max_output_tokens": mt,
+    }
+    if sys_instr:
+        cfg_kwargs["system_instruction"] = sys_instr
+    if json_mode:
+        cfg_kwargs["response_mime_type"] = "application/json"
+    config = types.GenerateContentConfig(**cfg_kwargs)
+    response = client.models.generate_content(
+        model=model_name,
+        contents=contents,
+        config=config,
+    )
+    text = getattr(response, "text", None) or ""
+    if json_mode and not (text or "").strip():
+        response = client.models.generate_content(model=model_name, contents=contents, config=config)
+        text = getattr(response, "text", None) or ""
+    return str(text)
+
+
+def _llm_anthropic_generate(
+    api_key: str,
+    model_name: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    json_mode: bool,
+) -> str:
+    from anthropic import Anthropic
+
+    system_parts: List[str] = []
+    anth_msgs: List[Dict[str, str]] = []
+    for m in messages:
+        role = (m.get("role") or "user").strip()
+        content = m.get("content") or ""
+        if role == "system":
+            system_parts.append(content)
+        elif role in ("user", "assistant"):
+            anth_msgs.append({"role": role, "content": content})
+        else:
+            anth_msgs.append({"role": "user", "content": content})
+    if json_mode:
+        system_parts.append(
+            "Respond with valid JSON only. No markdown code fences or explanatory text outside the JSON object."
+        )
+    system = "\n\n".join(system_parts) if system_parts else None
+    if not anth_msgs:
+        anth_msgs = [{"role": "user", "content": ""}]
+    cap = OPENAI_MAX_OUTPUT_TOKENS_JSON if json_mode else OPENAI_MAX_OUTPUT_TOKENS_NON_JSON
+    try:
+        mt = max(256, min(int(max_tokens), min(cap, 8192)))
+    except Exception:
+        mt = min(cap, 8192)
+    client = Anthropic(api_key=api_key)
+    kwargs: Dict[str, Any] = {
+        "model": model_name,
+        "max_tokens": mt,
+        "messages": anth_msgs,
+    }
+    if system:
+        kwargs["system"] = system
+    msg = client.messages.create(**kwargs)
+    blocks = getattr(msg, "content", None) or []
+    if blocks and hasattr(blocks[0], "text"):
+        return str(blocks[0].text)
+    return ""
+
+
 def _llm_chat(
     settings: Settings,
     model_id: str,
@@ -2897,6 +3161,36 @@ def _llm_chat(
         req_payload = _llm_chat_payload_for_openai(model, payload, json_mode=json_mode)
         req_payload["model"] = model
         openai_client = _get_openai_sdk_client(api_key, _resolved_openai_base_url(settings))
+    elif provider == "gemini":
+        api_key = cfg.get("api_key")
+        if not api_key:
+            raise HTTPException(status_code=503, detail="Google Gemini API key is not configured.")
+        model = cfg.get("model") or "gemini-2.5-pro"
+        provider_label = "Google Gemini"
+        try:
+            return _llm_gemini_generate(str(api_key), str(model), messages, max_tokens, json_mode)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{provider_label} error: {str(exc)[:800]}",
+            ) from exc
+    elif provider == "anthropic":
+        api_key = cfg.get("api_key")
+        if not api_key:
+            raise HTTPException(status_code=503, detail="Anthropic API key is not configured.")
+        model = cfg.get("model") or "claude-sonnet-4-6"
+        provider_label = "Anthropic Claude"
+        try:
+            return _llm_anthropic_generate(str(api_key), str(model), messages, max_tokens, json_mode)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{provider_label} error: {str(exc)[:800]}",
+            ) from exc
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
 
@@ -3234,11 +3528,17 @@ def _chat_system_prompt(
     persistent_user_memory_text: str = "",
     *,
     global_mode: bool = False,
+    org_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> str:
     compact = (analysis_context or {}).get("compactSummaryText") or ""
     ctx_for_dump = {k: v for k, v in (analysis_context or {}).items() if k != "compactSummaryText"}
     fb_text = _format_session_feedback_for_prompt(feedback)
-    org_prefix = _resolve_app_prompt(KEY_GLOBAL_CHAT_PREFIX if global_mode else KEY_PAGE_CHAT_PREFIX)
+    org_prefix = _resolve_app_prompt(
+        KEY_GLOBAL_CHAT_PREFIX if global_mode else KEY_PAGE_CHAT_PREFIX,
+        org_id=org_id,
+        user_id=user_id,
+    )
     evidence_json = {
         "kpis": (ctx_for_dump.get("kpis") or [])[:10],
         "trends": (ctx_for_dump.get("trends") or [])[:8],
@@ -3284,7 +3584,11 @@ def _chat_system_prompt(
     return core
 
 
-def _analysis_system_prompt(analysis_profile: Optional[str] = None) -> str:
+def _analysis_system_prompt(
+    analysis_profile: Optional[str] = None,
+    org_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> str:
     profile = (analysis_profile or "").strip().lower()
     profile_guidance = ""
     if profile.startswith("admin-console/overview/"):
@@ -3337,7 +3641,7 @@ def _analysis_system_prompt(analysis_profile: Optional[str] = None) -> str:
             "RegisterTracingStatus and table-level status breakdowns are supporting context; multi-table connectivity dominates risk scoring."
         )
 
-    base = _resolve_app_prompt(KEY_TABULAR_ANALYSIS_SYSTEM)
+    base = _resolve_app_prompt(KEY_TABULAR_ANALYSIS_SYSTEM, org_id=org_id, user_id=user_id)
     return base + (
         f"ANALYSIS PROFILE GUIDANCE:\n{profile_guidance if profile_guidance else 'Use default cross-domain analysis behavior.'}"
     )
@@ -5406,6 +5710,8 @@ def _analysis_from_rows(
     analysis_profile: Optional[str] = None,
     authoritative_row_total: Optional[int] = None,
     persistent_user_memory_text: Optional[str] = None,
+    org_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     df = _to_df(rows)
     df_cols = list(df.columns)
@@ -5418,7 +5724,8 @@ def _analysis_from_rows(
         )
         focus_columns = _get_focus_columns_heuristic(preprocessing_context, df_cols)
     anomalies = _detect_anomalies(df)
-    _analysis_llm_cfg = _get_model_config(settings, model_id)
+    eff_settings = _effective_settings_for_ai(settings, org_id, user_id)
+    _analysis_llm_cfg = _get_model_config(eff_settings, model_id)
     analysis_llm_provider = _analysis_llm_cfg.get("provider", "azure_openai")
     # Token guardrail: for large datasets, anomalies can be huge and blow the context window.
     # We still compute charts/summary from full anomalies, but only send a capped subset to the LLM.
@@ -5450,7 +5757,10 @@ def _analysis_from_rows(
     chunks = _chunk_list(anomalies_for_llm, chunk_size)
     for index, chunk in enumerate(chunks, start=1):
         messages = [
-            {"role": "system", "content": _analysis_system_prompt(analysis_profile)},
+            {
+                "role": "system",
+                "content": _analysis_system_prompt(analysis_profile, org_id=org_id, user_id=user_id),
+            },
             {
                 "role": "user",
                 "content": _build_analysis_user_prompt(
@@ -5465,12 +5775,12 @@ def _analysis_from_rows(
             },
         ]
         chunk_result = _parse_ai_json_with_repair(
-            settings,
-            _llm_chat(settings, model_id, messages, max_tokens=1200, json_mode=True),
+            eff_settings,
+            _llm_chat(eff_settings, model_id, messages, max_tokens=1200, json_mode=True),
             model_id,
         )
         llm_chunks.append(chunk_result)
-        if analysis_llm_provider == "openai" and index < len(chunks):
+        if analysis_llm_provider in ("openai", "gemini", "anthropic") and index < len(chunks):
             time.sleep(1.2)
     merged = _merge_llm_chunks(base, llm_chunks)
     _strip_redundant_total_rows_kpi(merged)
@@ -5813,6 +6123,8 @@ def _ensure_daily_analysis(
         analysis_profile=_normalize_page_id_alias(payload.pageId),
         authoritative_row_total=authoritative_register_total,
         persistent_user_memory_text=persistent_user_memory_text,
+        org_id=payload.orgId,
+        user_id=payload.userId,
     )
     if _is_report_job_detail_page_id(payload.pageId):
         if not importTracingObj:
@@ -5921,6 +6233,7 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
         userName=payload.userName,
     )
     analysis = _ensure_daily_analysis(settings, store, analysis_payload, request)
+    eff_settings = _effective_settings_for_ai(settings, payload.orgId, payload.userId)
     analysis_summary = analysis.get("analysisSummary", {})
     analysis_context = _build_chat_analysis_context(analysis)
     session_messages = store.get_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
@@ -5941,6 +6254,8 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
                 analysis_context,
                 feedback,
                 persistent_user_memory_text,
+                org_id=payload.orgId,
+                user_id=payload.userId,
             ),
         },
         {
@@ -5955,7 +6270,7 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
         },
     ]
     messages.extend(combined_history)
-    answer = _llm_chat(settings, chat_model_id, messages, max_tokens=1600)
+    answer = _llm_chat(eff_settings, chat_model_id, messages, max_tokens=1600)
     stored_history = (combined_history + [{"role": "assistant", "content": answer}])[-24:]
     store.save_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key, stored_history, analysis_summary)
     insight, charts_out = _build_chat_companion_payload(analysis, latest_user_question, answer)
@@ -5990,6 +6305,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
         userName=ctx_un or payload.userName,
     )
     analysis = _ensure_daily_analysis(settings, store, analysis_payload, request)
+    eff_settings = _effective_settings_for_ai(settings, payload.orgId, payload.userId)
     analysis_summary = analysis.get("analysisSummary", {})
     analysis_context = _build_chat_analysis_context(analysis)
 
@@ -6005,7 +6321,9 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
             latest_user_question = str(m.get("content") or "")
             break
 
-    system_prefix = _resolve_app_prompt(KEY_GLOBAL_CHAT_PREFIX)
+    system_prefix = _resolve_app_prompt(
+        KEY_GLOBAL_CHAT_PREFIX, org_id=payload.orgId, user_id=payload.userId
+    )
     messages = [
         {"role": "system", "content": system_prefix},
         {
@@ -6017,6 +6335,8 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
                 feedback,
                 persistent_user_memory_text,
                 global_mode=True,
+                org_id=payload.orgId,
+                user_id=payload.userId,
             ),
         },
         {
@@ -6035,7 +6355,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
         },
     ]
     messages.extend(combined_history)
-    answer = _llm_chat(settings, chat_model_id, messages, max_tokens=1700)
+    answer = _llm_chat(eff_settings, chat_model_id, messages, max_tokens=1700)
     stored_history = (combined_history + [{"role": "assistant", "content": answer}])[-28:]
     store.save_chat_messages(
         day_key,
@@ -6102,15 +6422,21 @@ def clear_global_chat_session(payload: GlobalChatSessionRequest, settings: Setti
 def _get_ai_admin_settings_payload(settings: Settings) -> AIAdminSettingsResponse:
     models = _get_ai_models_list(settings)
     return AIAdminSettingsResponse(
-        azureOpenAiApiKey=str(settings.azure_openai_api_key or "").strip(),
-        openAiApiKey=str(settings.openai_api_key or "").strip(),
         azureOpenAiApiKeyMasked=_mask_secret(settings.azure_openai_api_key),
         openAiApiKeyMasked=_mask_secret(settings.openai_api_key),
+        geminiApiKeyMasked=_mask_secret(settings.gemini_api_key),
+        anthropicApiKeyMasked=_mask_secret(settings.anthropic_api_key),
+        hasAzureOpenAiApiKey=bool(str(settings.azure_openai_api_key or "").strip()),
+        hasOpenAiApiKey=bool(str(settings.openai_api_key or "").strip()),
+        hasGeminiApiKey=bool(str(settings.gemini_api_key or "").strip()),
+        hasAnthropicApiKey=bool(str(settings.anthropic_api_key or "").strip()),
         azureOpenAiEndpoint=str(settings.azure_openai_endpoint or "").strip(),
         azureOpenAiApiVersion=str(settings.azure_openai_api_version or "").strip(),
         openAiBaseUrl=_resolved_openai_base_url(settings),
         azureDeployments=_configured_azure_deployments(settings),
         openAiModels=_configured_openai_models(settings),
+        geminiModels=_configured_gemini_models(settings),
+        anthropicModels=_configured_anthropic_models(settings),
         defaultAnalysisModelId=_default_model_id(settings, purpose="analysis") if models else None,
         defaultChatModelId=_default_model_id(settings, purpose="chat") if models else None,
         models=models,
@@ -6135,8 +6461,22 @@ def put_ai_admin_settings(payload: AIAdminSettingsUpdateRequest, settings: Setti
         else:
             store.delete_app_setting(key)
 
-    _upsert_or_delete("AZURE_OPENAI_API_KEY", payload.azureOpenAiApiKey)
-    _upsert_or_delete("OPENAI_API_KEY", payload.openAiApiKey)
+    if payload.clearAzureOpenAiApiKey:
+        store.delete_app_setting("AZURE_OPENAI_API_KEY")
+    elif payload.azureOpenAiApiKey is not None and str(payload.azureOpenAiApiKey).strip():
+        store.set_app_setting("AZURE_OPENAI_API_KEY", str(payload.azureOpenAiApiKey).strip())
+    if payload.clearOpenAiApiKey:
+        store.delete_app_setting("OPENAI_API_KEY")
+    elif payload.openAiApiKey is not None and str(payload.openAiApiKey).strip():
+        store.set_app_setting("OPENAI_API_KEY", str(payload.openAiApiKey).strip())
+    if payload.clearGeminiApiKey:
+        store.delete_app_setting("GEMINI_API_KEY")
+    elif payload.geminiApiKey is not None and str(payload.geminiApiKey).strip():
+        store.set_app_setting("GEMINI_API_KEY", str(payload.geminiApiKey).strip())
+    if payload.clearAnthropicApiKey:
+        store.delete_app_setting("ANTHROPIC_API_KEY")
+    elif payload.anthropicApiKey is not None and str(payload.anthropicApiKey).strip():
+        store.set_app_setting("ANTHROPIC_API_KEY", str(payload.anthropicApiKey).strip())
     _upsert_or_delete("AZURE_OPENAI_ENDPOINT", payload.azureOpenAiEndpoint)
     _upsert_or_delete("AZURE_OPENAI_API_VERSION", payload.azureOpenAiApiVersion)
     _upsert_or_delete("OPENAI_BASE_URL", payload.openAiBaseUrl)
@@ -6147,6 +6487,12 @@ def put_ai_admin_settings(payload: AIAdminSettingsUpdateRequest, settings: Setti
     if payload.openAiModels is not None:
         joined = ",".join([str(x).strip() for x in payload.openAiModels if str(x).strip()])
         _upsert_or_delete("OPENAI_MODELS", joined)
+    if payload.geminiModels is not None:
+        joined = ",".join([str(x).strip() for x in payload.geminiModels if str(x).strip()])
+        _upsert_or_delete("GEMINI_MODELS", joined)
+    if payload.anthropicModels is not None:
+        joined = ",".join([str(x).strip() for x in payload.anthropicModels if str(x).strip()])
+        _upsert_or_delete("ANTHROPIC_MODELS", joined)
 
     # Validate selected defaults against current configured model list.
     next_settings = get_settings()
@@ -6167,7 +6513,10 @@ def put_ai_admin_settings(payload: AIAdminSettingsUpdateRequest, settings: Setti
 
 
 @app.get("/api/ai/prompt-config", response_model=PromptConfigResponse)
-def get_prompt_config():
+def get_prompt_config(
+    orgId: Optional[str] = Query(None),
+    userId: Optional[str] = Query(None),
+):
     store = get_store()
     sections: List[PromptConfigSection] = []
     for meta in PROMPT_SECTIONS:
@@ -6175,17 +6524,92 @@ def get_prompt_config():
         default_text = PROMPT_DEFAULTS.get(pid, "")
         stored = store.get_app_prompt(pid)
         is_custom = stored is not None and bool(str(stored).strip())
+        user_raw = (
+            store.get_user_prompt(orgId, userId, pid)
+            if (orgId and userId)
+            else None
+        )
+        user_prompt = str(user_raw).strip() if user_raw is not None else ""
+        eff = _resolve_app_prompt(pid, org_id=orgId, user_id=userId)
+        if user_prompt:
+            src = "user"
+        elif stored is not None and str(stored).strip():
+            src = "admin"
+        else:
+            src = "default"
         sections.append(
             PromptConfigSection(
                 id=pid,
                 title=str(meta["title"]),
                 description=str(meta["description"]),
-                value=_resolve_app_prompt(pid),
+                value=eff,
                 isCustom=is_custom,
                 defaultText=default_text,
+                userPrompt=(user_prompt if orgId and userId else None),
+                effectiveSource=src if orgId and userId else None,
             )
         )
     return PromptConfigResponse(sections=sections)
+
+
+@app.put("/api/ai/prompt-config/user")
+def put_user_prompt_config(payload: UserPromptConfigUpdateRequest):
+    store = get_store()
+    for key, val in (payload.prompts or {}).items():
+        if key not in PROMPT_DEFAULTS:
+            raise HTTPException(status_code=400, detail=f"Unknown prompt key '{key}'.")
+        if val is None or (isinstance(val, str) and not str(val).strip()):
+            store.delete_user_prompt(payload.orgId, payload.userId, key)
+            continue
+        body = str(val).strip()
+        if len(body) > _MAX_APP_PROMPT_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Prompt '{key}' exceeds {_MAX_APP_PROMPT_CHARS} characters.",
+            )
+        store.set_user_prompt(payload.orgId, payload.userId, key, body)
+    return {"ok": True}
+
+
+@app.get("/api/ai/user/api-keys", response_model=UserApiKeysGetResponse)
+def get_user_api_keys(
+    orgId: str = Query(...),
+    userId: str = Query(...),
+):
+    store = get_store()
+    provs = ["azure_openai", "openai", "gemini", "anthropic"]
+    out: Dict[str, Dict[str, Any]] = {}
+    for p in provs:
+        pt = store.get_user_api_key_plaintext(orgId, userId, p)
+        out[p] = {
+            "hasOverride": bool(pt),
+            "masked": _mask_secret(pt) if pt else "",
+        }
+    return UserApiKeysGetResponse(orgId=orgId, userId=userId, providers=out)
+
+
+@app.put("/api/ai/user/api-keys")
+def put_user_api_keys(payload: UserApiKeysUpdateRequest):
+    store = get_store()
+    mapping = [
+        ("azure_openai", payload.azureOpenAiApiKey, payload.clearAzureOpenAiApiKey),
+        ("openai", payload.openAiApiKey, payload.clearOpenAiApiKey),
+        ("gemini", payload.geminiApiKey, payload.clearGeminiApiKey),
+        ("anthropic", payload.anthropicApiKey, payload.clearAnthropicApiKey),
+    ]
+    for prov, raw, clear in mapping:
+        if clear:
+            store.delete_user_api_key(payload.orgId, payload.userId, prov)
+        elif raw is not None and str(raw).strip():
+            store.set_user_api_key(payload.orgId, payload.userId, prov, str(raw).strip())
+    return {"ok": True}
+
+
+@app.post("/api/ai/user/api-keys/clear")
+def clear_user_api_keys(payload: UserApiKeysClearRequest):
+    store = get_store()
+    store.delete_all_user_api_keys(payload.orgId, payload.userId)
+    return {"ok": True}
 
 
 @app.put("/api/ai/prompt-config")

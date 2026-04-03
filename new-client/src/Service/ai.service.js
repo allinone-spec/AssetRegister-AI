@@ -54,15 +54,35 @@ export const clearGlobalChatSession = async (payload) => {
   return response.data;
 };
 
-/** Admin: load configurable LLM system prompts (defaults + overrides). */
-export const fetchPromptConfig = async () => {
-  const response = await aiApi.get("/prompt-config");
+/** Admin: load configurable LLM system prompts (defaults + overrides). Pass { orgId, userId } for user-layer prompts. */
+export const fetchPromptConfig = async (params = {}) => {
+  const response = await aiApi.get("/prompt-config", { params });
   return response.data;
 };
 
 /** Admin: save or clear (null / blank removes override) prompt sections. */
 export const savePromptConfig = async (payload) => {
   const response = await aiApi.put("/prompt-config", payload);
+  return response.data;
+};
+
+export const saveUserPromptConfig = async (payload) => {
+  const response = await aiApi.put("/prompt-config/user", payload);
+  return response.data;
+};
+
+export const fetchUserApiKeys = async (orgId, userId) => {
+  const response = await aiApi.get("/user/api-keys", { params: { orgId, userId } });
+  return response.data;
+};
+
+export const saveUserApiKeys = async (payload) => {
+  const response = await aiApi.put("/user/api-keys", payload);
+  return response.data;
+};
+
+export const clearUserApiKeys = async (payload) => {
+  const response = await aiApi.post("/user/api-keys/clear", payload);
   return response.data;
 };
 

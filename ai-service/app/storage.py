@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.crypto_secrets import SECRET_APP_SETTING_KEYS, decrypt_secret, encrypt_secret
+
 
 def utc_day_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -104,6 +106,24 @@ class AIStateStore:
                     analysis_summary_json TEXT,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (org_id, user_id, insight_base_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_prompts (
+                    org_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    prompt_key TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (org_id, user_id, prompt_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS user_api_keys (
+                    org_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    ciphertext TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (org_id, user_id, provider)
                 );
                 """
             )
@@ -632,10 +652,19 @@ class AIStateStore:
                 "SELECT setting_value FROM app_settings WHERE setting_key = ?",
                 (setting_key,),
             ).fetchone()
-        return str(row["setting_value"]) if row and row["setting_value"] is not None else None
+        if not row or row["setting_value"] is None:
+            return None
+        raw = str(row["setting_value"])
+        if setting_key in SECRET_APP_SETTING_KEYS:
+            return decrypt_secret(raw) or raw
+        return raw
 
     def set_app_setting(self, setting_key: str, setting_value: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        to_store = setting_value
+        if setting_key in SECRET_APP_SETTING_KEYS and to_store:
+            if not str(to_store).startswith("enc:v1:"):
+                to_store = encrypt_secret(str(to_store).strip())
         with self._connect() as conn:
             conn.execute(
                 """
@@ -645,7 +674,7 @@ class AIStateStore:
                     setting_value = excluded.setting_value,
                     updated_at = excluded.updated_at
                 """,
-                (setting_key, setting_value, now),
+                (setting_key, to_store, now),
             )
 
     def delete_app_setting(self, setting_key: str) -> None:
@@ -655,4 +684,104 @@ class AIStateStore:
     def list_app_settings(self) -> Dict[str, str]:
         with self._connect() as conn:
             rows = conn.execute("SELECT setting_key, setting_value FROM app_settings").fetchall()
-        return {str(r["setting_key"]): str(r["setting_value"]) for r in rows}
+        out: Dict[str, str] = {}
+        for r in rows:
+            k = str(r["setting_key"])
+            v = str(r["setting_value"]) if r["setting_value"] is not None else ""
+            if k in SECRET_APP_SETTING_KEYS and v:
+                out[k] = decrypt_secret(v) or v
+            else:
+                out[k] = v
+        return out
+
+    # --- Per-user prompt overrides (user wins over admin app_prompts for that user) ---
+
+    def get_user_prompt(self, org_id: str, user_id: str, prompt_key: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT body FROM user_prompts
+                WHERE org_id = ? AND user_id = ? AND prompt_key = ?
+                """,
+                (org_id, user_id, prompt_key),
+            ).fetchone()
+        return str(row["body"]) if row and row["body"] is not None else None
+
+    def set_user_prompt(self, org_id: str, user_id: str, prompt_key: str, body: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_prompts (org_id, user_id, prompt_key, body, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(org_id, user_id, prompt_key) DO UPDATE SET
+                    body = excluded.body,
+                    updated_at = excluded.updated_at
+                """,
+                (org_id, user_id, prompt_key, body, now),
+            )
+
+    def delete_user_prompt(self, org_id: str, user_id: str, prompt_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM user_prompts WHERE org_id = ? AND user_id = ? AND prompt_key = ?",
+                (org_id, user_id, prompt_key),
+            )
+
+    def delete_all_user_prompts(self, org_id: str, user_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM user_prompts WHERE org_id = ? AND user_id = ?", (org_id, user_id))
+
+    # --- Per-user API key overrides (decrypted only server-side) ---
+
+    def get_user_api_key_ciphertext(self, org_id: str, user_id: str, provider: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT ciphertext FROM user_api_keys
+                WHERE org_id = ? AND user_id = ? AND provider = ?
+                """,
+                (org_id, user_id, provider),
+            ).fetchone()
+        return str(row["ciphertext"]) if row and row["ciphertext"] is not None else None
+
+    def set_user_api_key(self, org_id: str, user_id: str, provider: str, plaintext: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        ct = encrypt_secret(plaintext.strip())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_api_keys (org_id, user_id, provider, ciphertext, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(org_id, user_id, provider) DO UPDATE SET
+                    ciphertext = excluded.ciphertext,
+                    updated_at = excluded.updated_at
+                """,
+                (org_id, user_id, provider, ct, now),
+            )
+
+    def delete_user_api_key(self, org_id: str, user_id: str, provider: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM user_api_keys WHERE org_id = ? AND user_id = ? AND provider = ?",
+                (org_id, user_id, provider),
+            )
+
+    def delete_all_user_api_keys(self, org_id: str, user_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM user_api_keys WHERE org_id = ? AND user_id = ?", (org_id, user_id))
+
+    def list_user_api_key_providers(self, org_id: str, user_id: str) -> List[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT provider FROM user_api_keys WHERE org_id = ? AND user_id = ? ORDER BY provider",
+                (org_id, user_id),
+            ).fetchall()
+        return [str(r["provider"]) for r in rows]
+
+    def get_user_api_key_plaintext(self, org_id: str, user_id: str, provider: str) -> Optional[str]:
+        ct = self.get_user_api_key_ciphertext(org_id, user_id, provider)
+        if not ct:
+            return None
+        p = decrypt_secret(ct)
+        return p if p else None

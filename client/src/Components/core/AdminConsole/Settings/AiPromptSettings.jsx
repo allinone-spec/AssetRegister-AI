@@ -7,7 +7,7 @@ import {
   CircularProgress,
   Typography,
 } from "@mui/material";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import toast from "react-hot-toast";
 import {
   BarChart3,
@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import PageLayout from "../../../Common/PageLayout";
 import { setHeadingTitle } from "../../../../redux/Slices/HeadingTitle";
-import { fetchPromptConfig, savePromptConfig } from "../../../../Service/ai.service";
+import { fetchPromptConfig, savePromptConfig, saveUserPromptConfig } from "../../../../Service/ai.service";
 
 const SECTION_ICON = {
   admin_console_insights: LayoutDashboard,
@@ -39,6 +39,11 @@ function SectionIcon({ id, className }) {
 
 const AiPromptSettings = ({ routeName }) => {
   const dispatch = useDispatch();
+  const user = useSelector((state) => state.auth?.user);
+  const orgId = user?.orgId || "default-org";
+  const userId = user?.id || "";
+  /** org = shared admin templates; user = your overrides (win over org for your account). */
+  const [promptScope, setPromptScope] = useState("org");
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [savingId, setSavingId] = useState(null);
@@ -52,13 +57,16 @@ const AiPromptSettings = ({ routeName }) => {
     if (isRefresh) setRefreshing(true);
     else setInitialLoading(true);
     try {
-      const data = await fetchPromptConfig();
+      const scopeUser = promptScope === "user" && userId;
+      const data = await fetchPromptConfig(
+        scopeUser ? { orgId, userId } : {}
+      );
       const list = data?.sections || [];
       setSections(list);
       const next = {};
       const base = {};
       list.forEach((s) => {
-        const v = s.value ?? "";
+        const v = scopeUser ? (s.userPrompt ?? "") : (s.value ?? "");
         next[s.id] = v;
         base[s.id] = v;
       });
@@ -77,7 +85,7 @@ const AiPromptSettings = ({ routeName }) => {
       if (isRefresh) setRefreshing(false);
       else setInitialLoading(false);
     }
-  }, []);
+  }, [promptScope, orgId, userId]);
 
   useEffect(() => {
     dispatch(setHeadingTitle("AI prompt templates"));
@@ -94,8 +102,17 @@ const AiPromptSettings = ({ routeName }) => {
   const handleSaveSection = async (id) => {
     setSavingId(id);
     try {
-      await savePromptConfig({ prompts: { [id]: drafts[id] ?? "" } });
-      toast.success("Saved. Re-run Refresh on insight panels to pick up tabular analysis changes the same day.");
+      if (promptScope === "user" && userId) {
+        await saveUserPromptConfig({
+          orgId,
+          userId,
+          prompts: { [id]: drafts[id] ?? "" },
+        });
+        toast.success("Saved your prompt override.");
+      } else {
+        await savePromptConfig({ prompts: { [id]: drafts[id] ?? "" } });
+        toast.success("Saved. Re-run Refresh on insight panels to pick up tabular analysis changes the same day.");
+      }
       await load("refresh");
     } catch (e) {
       toast.error(
@@ -111,9 +128,15 @@ const AiPromptSettings = ({ routeName }) => {
   const handleResetSection = async (id, defaultText) => {
     setSavingId(id);
     try {
-      await savePromptConfig({ prompts: { [id]: null } });
-      setDrafts((prev) => ({ ...prev, [id]: defaultText ?? "" }));
-      toast.success("Reset to built-in default.");
+      if (promptScope === "user" && userId) {
+        await saveUserPromptConfig({ orgId, userId, prompts: { [id]: null } });
+        setDrafts((prev) => ({ ...prev, [id]: "" }));
+        toast.success("Cleared your override — organization / built-in defaults apply for you.");
+      } else {
+        await savePromptConfig({ prompts: { [id]: null } });
+        setDrafts((prev) => ({ ...prev, [id]: defaultText ?? "" }));
+        toast.success("Reset to built-in default.");
+      }
       await load("refresh");
     } catch (e) {
       toast.error(e?.response?.data?.detail || e?.message || "Reset failed.");
@@ -163,10 +186,38 @@ const AiPromptSettings = ({ routeName }) => {
                 AI prompt templates
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-600">
-                Override the system instructions sent to the model for each product flow. Empty text falls back to
-                built-in defaults. Updates apply on the next request; cached same-day analysis may need{" "}
+                {promptScope === "org"
+                  ? "Organization-wide overrides (admin). Empty text falls back to built-in defaults."
+                  : "Your personal overrides take effect for your user account on the next AI request (over organization defaults when set)."}
+                {" "}
+                Cached same-day analysis may need{" "}
                 <strong className="font-semibold text-slate-800">Refresh</strong> on an insights panel.
               </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPromptScope("org")}
+                  className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
+                    promptScope === "org"
+                      ? "bg-violet-600 text-white shadow-sm"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  }`}
+                >
+                  Organization prompts
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPromptScope("user")}
+                  disabled={!userId}
+                  className={`rounded-full px-4 py-1.5 text-sm font-semibold transition-colors ${
+                    promptScope === "user"
+                      ? "bg-violet-600 text-white shadow-sm"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  } disabled:cursor-not-allowed disabled:opacity-50`}
+                >
+                  My prompts
+                </button>
+              </div>
             </div>
           </div>
           <Button
@@ -319,6 +370,15 @@ const AiPromptSettings = ({ routeName }) => {
                             )}
                           </div>
                           <p className="mt-1 text-xs leading-relaxed text-slate-600">{s.description}</p>
+                          {promptScope === "user" && (s.value || "").trim() ? (
+                            <p className="mt-2 max-w-3xl text-[11px] leading-snug text-slate-500">
+                              Effective text for your account (preview):{" "}
+                              <span className="font-mono text-slate-700">
+                                {(s.value || "").slice(0, 280)}
+                                {(s.value || "").length > 280 ? "…" : ""}
+                              </span>
+                            </p>
+                          ) : null}
                         </div>
                       </div>
                     </AccordionSummary>
@@ -334,7 +394,11 @@ const AiPromptSettings = ({ routeName }) => {
                           onChange={(e) => handleDraftChange(s.id, e.target.value)}
                           spellCheck={false}
                           aria-label={s.title}
-                          placeholder="Leave empty to use the built-in default for this section."
+                          placeholder={
+                            promptScope === "user"
+                              ? "Your override only. Leave empty to inherit organization / built-in defaults."
+                              : "Leave empty to use the built-in default for this section."
+                          }
                         />
                       </div>
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
@@ -381,7 +445,7 @@ const AiPromptSettings = ({ routeName }) => {
                             "&:hover": { borderColor: "#94a3b8", bgcolor: "rgba(148,163,184,0.08)" },
                           }}
                         >
-                          Reset to default
+                          {promptScope === "user" ? "Clear my override" : "Reset to default"}
                         </Button>
                       </div>
                     </AccordionDetails>
