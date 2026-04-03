@@ -4,7 +4,11 @@ client/dist/
 client/dist-ssr/
 client/.vite/
 client/.turbo/
-node_modules/
+new-client/node_modules/
+new-client/dist/
+new-client/dist-ssr/
+new-client/.vite/
+new-client/.turbo/
 dist/
 
 ### Environment & secrets (never commit)
@@ -14,8 +18,13 @@ dist/
 client/.env
 client/.env.local
 client/.env.*.local
+new-client/.env
+new-client/.env.local
+new-client/.env.*.local
 ai-service/.env
 *.local
+*.pem
+*.key
 
 ### Node / npm / yarn / pnpm
 client/npm-debug.log*
@@ -23,6 +32,11 @@ client/yarn-debug.log*
 client/yarn-error.log*
 client/pnpm-debug.log*
 client/lerna-debug.log*
+new-client/npm-debug.log*
+new-client/yarn-debug.log*
+new-client/yarn-error.log*
+new-client/pnpm-debug.log*
+new-client/lerna-debug.log*
 *.log
 .eslintcache
 *.tsbuildinfo
@@ -31,7 +45,7 @@ client/lerna-debug.log*
 ai-service/.venv/
 ai-service/venv/
 ai-service/__pycache__/
-ai-service/app/__pycache__/
+ai-service/**/__pycache__/
 ai-service/*.py[cod]
 ai-service/*.pyo
 ai-service/.mypy_cache/
@@ -54,11 +68,16 @@ ai-service/*.sqlite3
 ai-service/data.csv
 ai-service/test.py
 ai-service/test1.py
+ai-service/test_azure_openai.py
+ai-service/test_claude.py
+ai-service/test_gemini.py
+ai-service/test_openai.py
 
 ### OS
 .DS_Store
 .DS_Store?
 Thumbs.db
+ehthumbs.db
 Desktop.ini
 
 ### Editors & IDEs
