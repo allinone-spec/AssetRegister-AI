@@ -15,6 +15,7 @@ const EditForm = ({ job, activeTab, onClose, setDrawerMode }) => {
           type="getAC"
           data={job}
           setDrawerMode={setDrawerMode}
+          key={`${job?.jobName}-${job?.priority}`}
         />
       );
     case "By AR Source":
@@ -26,11 +27,13 @@ const EditForm = ({ job, activeTab, onClose, setDrawerMode }) => {
           onClose={onClose}
           data={job}
           setDrawerMode={setDrawerMode}
+          key={`${job?.jobName}-${job?.priority}`}
         />
       );
     case "File List":
       return (
         <FolderFilterView
+          key={`${job?.jobName}-${job?.priority}`}
           routeName="Reports"
           onClose={onClose}
           data={job}
@@ -40,6 +43,7 @@ const EditForm = ({ job, activeTab, onClose, setDrawerMode }) => {
     default:
       return (
         <ReportsCommonTable
+          key={`${job?.jobName}-${job?.priority}`}
           routeName="Reports"
           title="Original Source"
           type="getAC"
@@ -93,6 +97,7 @@ export function ReportSidebarDrawer({
     >
       {isFolderMode ? (
         <CreateFolder
+          key={folderData?.id}
           sourceType="Report"
           folderDetails={{
             sourceType: "Report",

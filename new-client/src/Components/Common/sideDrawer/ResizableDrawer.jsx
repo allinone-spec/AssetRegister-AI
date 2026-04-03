@@ -53,9 +53,9 @@ export function ResizableDrawer({
 
   if (isFullscreen) {
     return (
-      <div className="fixed inset-0 z-[9999] bg-surface overflow-y-auto no-scrollbar">
+      <div className="fixed top-14 left-0 right-0 bottom-0 z-[9999] bg-surface overflow-y-auto no-scrollbar">
         {/* Header */}
-        <div className="flex items-center justify-between p-5 pb-4">
+        <div className="flex items-center justify-between p-5 pb-4 border-b border-border-theme">
           <span className="text-xs font-bold text-text-sub uppercase tracking-wide">
             {title}
           </span>

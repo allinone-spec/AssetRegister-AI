@@ -92,7 +92,7 @@ export function Header({ user, onLogout }) {
 
   return (
     <>
-      <nav className="h-14 flex items-center px-4 lg:px-6 border-b border-border-theme bg-nav-bg shadow-theme z-20">
+      <nav className="relative h-14 flex items-center px-4 lg:px-6 border-b border-border-theme bg-nav-bg shadow-theme z-[1200]">
         {/* ── Brand ─────────────────────────────────────────────────────────── */}
         <div
           className="flex items-center gap-3 min-w-0 cursor-pointer"
