@@ -176,10 +176,10 @@ const EditPermissionPage = () => {
 
       if (response.status === 200) {
         if (permissionId?.includes(formData?.permissionId))
-          navigate("/data-console/security/permission", {
+          navigate("/data-console/security?section=permissions", {
             state: true,
           });
-        else navigate("/data-console/security/permission");
+        else navigate("/data-console/security?section=permissions");
 
         toast.success("Permissions updated successfully!");
       } else {

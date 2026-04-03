@@ -84,7 +84,7 @@ const sidebarData = [
     path: "/data-console/register",
     Links: [
       { title: "Summary", path: "/data-console/register/summary" },
-      { title: "Detailed", path: "/data-console/register/detailed" },
+      { title: "Detailed", path: "/data-console/register?tab=detailed" },
     ],
   },
   {
@@ -105,8 +105,8 @@ const sidebarData = [
         path: "/data-console/settings/scheduled-emails",
       },
       { title: "Object", path: "/data-console/settings/object-configuration" },
-      { title: "AI Prompts", path: "/data-console/settings/ai-prompts" },
-      { title: "AI Model", path: "/data-console/settings/ai-model" },
+      { title: "AI Prompts", path: "/data-console/settings?tab=ai-prompts" },
+      { title: "AI Model", path: "/data-console/settings?tab=ai-model" },
     ],
     button: { title: "Theme" },
   },
@@ -116,10 +116,10 @@ const sidebarData = [
     Folder: false,
     path: "/data-console/security",
     Links: [
-      { title: "Users", path: "/data-console/security/users" },
-      { title: "Groups", path: "/data-console/security/groups" },
-      { title: "Roles", path: "/data-console/security/roles" },
-      { title: "Permissions", path: "/data-console/security/permission" },
+      { title: "Users", path: "/data-console/security?section=users" },
+      { title: "Groups", path: "/data-console/security?section=groups" },
+      { title: "Roles", path: "/data-console/security?section=roles" },
+      { title: "Permissions", path: "/data-console/security?section=permissions" },
     ],
   },
 ];

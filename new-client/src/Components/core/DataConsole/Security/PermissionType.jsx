@@ -190,6 +190,7 @@ const PermissionTypeTable = ({
           setFilteredData={setFilteredTableData}
           tableName={tableNameEnum.PERMISSION}
           isDrawer={isDrawer}
+          aiSecurityShellPath="/data-console/security/permission"
           tableView={view}
           // setOpenDrawer={handleDrawer}
           openDrawerId={openDrawer?.permissionId}

@@ -1,17 +1,42 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import SettingsSidebar from "./Settingssidebar";
 import SsoTable from "../../core/AdminConsole/Sso/SsoTable";
 import ObjectConfig from "../../core/DataConsole/Settings/ObjectConfiguration";
 import AddStmpForm from "../../core/AdminConsole/Stmp/AddStmpForm";
 import { ScheduledEmailsTable } from "../../core/AdminConsole/ScheduledEmails";
+import AiPromptSettings from "../../core/AdminConsole/Settings/AiPromptSettings";
+import AiModelSettings from "../../core/AdminConsole/Settings/AiModelSettings";
 import { SettingDrawer } from "../sideDrawer/SettingDrawer";
 import PageLayout from "../PageLayout";
 
+const TAB_FROM_QUERY = {
+  "ai-prompts": "AI Prompts",
+  "ai-model": "AI Model",
+};
+
+const QUERY_FROM_TAB = {
+  "AI Prompts": "ai-prompts",
+  "AI Model": "ai-model",
+};
+
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState("SSO Configuration");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabFromUrl = searchParams.get("tab");
+  const initialTab =
+    tabFromUrl && TAB_FROM_QUERY[tabFromUrl] ? TAB_FROM_QUERY[tabFromUrl] : "SSO Configuration";
+
+  const [activeTab, setActiveTab] = useState(initialTab);
   const [editJob, setEditJob] = useState(false);
   const [openDrawer, setOpenDrawer] = useState(null);
   const [openDeleteModel, setOpenDeleteModel] = useState(false);
+
+  useEffect(() => {
+    const t = searchParams.get("tab");
+    if (t && TAB_FROM_QUERY[t]) {
+      setActiveTab(TAB_FROM_QUERY[t]);
+    }
+  }, [searchParams]);
 
   const handleDrawer = (val) => {
     setOpenDrawer(val);
@@ -64,6 +89,10 @@ export default function SettingsPage() {
             isDrawer
           />
         );
+      case "AI Prompts":
+        return <AiPromptSettings routeName="Settings" embedded />;
+      case "AI Model":
+        return <AiModelSettings routeName="Settings" embedded />;
       default:
         return (
           <SsoTable
@@ -84,6 +113,12 @@ export default function SettingsPage() {
     setActiveTab(val);
     setEditJob(false);
     setOpenDrawer(null);
+    const q = QUERY_FROM_TAB[val];
+    if (q) {
+      setSearchParams({ tab: q });
+    } else {
+      setSearchParams({});
+    }
   };
 
   return (

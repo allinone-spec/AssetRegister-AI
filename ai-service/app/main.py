@@ -29,7 +29,7 @@ from app.prompt_defaults import (
     PROMPT_DEFAULTS,
     PROMPT_SECTIONS,
 )
-from app.storage import AIStateStore, utc_day_key
+from app.storage import AIStateStore, PERSISTENT_AI_DAY_KEY
 
 # Serialize OpenAI HTTP calls: parallel /analyze + chat completions share one key and trip RPM limits.
 _openai_completion_lock = threading.Lock()
@@ -155,6 +155,7 @@ class AnalyzeRequest(BaseModel):
     modelId: Optional[str] = None
     customPrompt: Optional[str] = None
     focusColumns: Optional[List[str]] = None
+    userName: Optional[str] = None  # Import Status API: merge_{objectName} / jobName filters
 
 
 class ChatMessage(BaseModel):
@@ -171,6 +172,7 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     modelId: Optional[str] = None
     focusColumns: Optional[List[str]] = None
+    userName: Optional[str] = None
 
 
 class GlobalChatRequest(BaseModel):
@@ -183,6 +185,7 @@ class GlobalChatRequest(BaseModel):
     messages: List[ChatMessage]
     modelId: Optional[str] = None
     focusColumns: Optional[List[str]] = None
+    userName: Optional[str] = None
 
 
 class FeedbackRequest(BaseModel):
@@ -205,6 +208,7 @@ class ChatSessionRequest(BaseModel):
     category: str
     filters: Dict[str, Any] = {}
     modelId: Optional[str] = None
+    userName: Optional[str] = None
 
 
 class GlobalChatSessionRequest(BaseModel):
@@ -907,6 +911,161 @@ def _session_dataset_key(payload: AnalyzeRequest | ChatRequest | ChatSessionRequ
         "sessionCacheVersion": session_cache_version,
     }
     return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _import_aware_scope_from_payload(payload: AnalyzeRequest) -> Optional[Dict[str, str]]:
+    """
+    Register: filterKey/searchText = merge_{objectName}. Report job: filterKey/searchText = jobName.
+    """
+    page_id = _normalize_page_id_alias(payload.pageId).split("?", 1)[0].rstrip("/")
+    filters = payload.filters or {}
+    dd = filters.get("dashboardData") or {}
+    cat = (payload.category or "").strip().lower()
+
+    is_register = (
+        page_id == "data-console/register/detailed"
+        or dd.get("tableType") == "register"
+        or cat == "register"
+    )
+    if is_register:
+        oid = dd.get("objectId") or filters.get("objectId")
+        if oid is None or str(oid).strip() == "":
+            return None
+        obj_name = str(dd.get("objectName") or filters.get("objectName") or "").strip()
+        if not obj_name:
+            return None
+        fk = f"merge_{obj_name}"
+        return {
+            "kind": "register",
+            "scope_key": f"obj:{str(oid).strip()}",
+            "filter_key": fk,
+            "search_text": fk,
+        }
+
+    if "/jobs/" in page_id and (
+        "data-console/reports/original-source/jobs/" in page_id
+        or "data-console/reports/by-ar-resource/jobs/" in page_id
+    ):
+        job = page_id.rsplit("/jobs/", 1)[-1].strip("/")
+        if not job:
+            job = str(filters.get("jobName") or "").strip()
+        if not job:
+            return None
+        j = job.strip()
+        return {
+            "kind": "report_job",
+            "scope_key": f"job:{j}",
+            "filter_key": j,
+            "search_text": j,
+        }
+    return None
+
+
+def _resolve_user_name_for_status(payload: AnalyzeRequest) -> str:
+    return str((payload.userName or "").strip())
+
+
+def _status_get_import_status_body(filter_key: str, search_text: str, user_name: str) -> Dict[str, Any]:
+    return {
+        "sortColumns": None,
+        "viewId": None,
+        "filterKey": filter_key,
+        "objectId": "",
+        "primaryKey": None,
+        "orderColumnHeaders": [],
+        "createdSTP": None,
+        "createdBy": None,
+        "updatedBy": None,
+        "updatedSTP": None,
+        "userName": user_name,
+        "searchText": search_text,
+        "filterExpression": {"logic": "AND", "conditions": []},
+        "selectedKeys": None,
+        "tableName": "ImportStatus",
+        "xDaysFilter": None,
+        "xFilter": False,
+    }
+
+
+def _latest_success_start_time_from_status_rows(rows: List[Dict[str, Any]]) -> Optional[str]:
+    best: Optional[str] = None
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("status") or "").strip().upper() != "SUCCESS":
+            continue
+        st = r.get("startTime")
+        if not st:
+            continue
+        s = str(st).strip()
+        if not s:
+            continue
+        if best is None or s > best:
+            best = s
+    return best
+
+
+def _fetch_latest_success_import_time(
+    settings: Settings,
+    request: Optional[Request],
+    user_name: str,
+    filter_key: str,
+    search_text: str,
+) -> Optional[str]:
+    un = (user_name or "").strip()
+    fk = (filter_key or "").strip()
+    if not un or not fk:
+        return None
+    base = (settings.assetregister_admin_console_base_url or "").rstrip("/")
+    if not base:
+        return None
+    url = f"{base}/Status/get?page=-1&size=500"
+    headers = _build_backend_headers(settings, request)
+    body = _status_get_import_status_body(fk, (search_text or fk).strip() or fk, un)
+    try:
+        data = _request_json("POST", url, headers, body, timeout=120)
+    except HTTPException:
+        return None
+    except Exception:
+        return None
+    raw_rows = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(raw_rows, list):
+        return None
+    return _latest_success_start_time_from_status_rows(raw_rows)
+
+
+def _import_insight_base_key(payload: AnalyzeRequest, model_id: str) -> str:
+    scope = _import_aware_scope_from_payload(payload)
+    if not scope:
+        return ""
+    raw = {
+        "orgId": payload.orgId,
+        "userId": payload.userId,
+        "kind": scope["kind"],
+        "scopeKey": scope["scope_key"],
+        "modelId": model_id,
+        "customPrompt": (payload.customPrompt or "").strip(),
+        "focusColumns": sorted(payload.focusColumns or []),
+        "insightV": "import-aware-v1",
+    }
+    return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _build_import_aware_context(
+    settings: Settings,
+    payload: AnalyzeRequest,
+    request: Optional[Request],
+) -> Optional[Dict[str, Any]]:
+    scope = _import_aware_scope_from_payload(payload)
+    un = _resolve_user_name_for_status(payload)
+    if not scope or not un:
+        return None
+    live = _fetch_latest_success_import_time(
+        settings, request, un, scope["filter_key"], scope["search_text"]
+    )
+    if not live:
+        return None
+    return {"scope": scope, "live_import": live}
 
 
 def _model_id_or_default(payload_model: Optional[str], settings: Settings, purpose: str = "analysis") -> str:
@@ -1674,7 +1833,7 @@ def _build_admin_console_overview_response(
         if text.strip():
             total_insights.append({"title": title, "text": text, "severity": "info"})
 
-    day_key = utc_day_key()
+    day_key = PERSISTENT_AI_DAY_KEY
     notes = highlights.get("operationalNotes") or []
     trends = [{"text": str(t)} for t in notes if str(t).strip()][:8]
     watch = highlights.get("watchlist") or []
@@ -1976,7 +2135,7 @@ def _build_data_console_home_response(
     if mh.strip():
         total_insights.append({"title": "Maturity", "text": mh.strip()[:1200], "severity": "info"})
 
-    day_key = utc_day_key()
+    day_key = PERSISTENT_AI_DAY_KEY
 
     return {
         "totalInsights": total_insights[:10],
@@ -3410,9 +3569,14 @@ def _resolve_global_analysis_scope(
         dd_reg: Dict[str, Any] = {"tableType": "register"}
         if selected_object is not None:
             dd_reg["objectId"] = selected_object
+        obj_nm = str(ctx.get("objectName") or "").strip()
+        if obj_nm:
+            dd_reg["objectName"] = obj_nm
         flt_reg: Dict[str, Any] = {**ctx, "dashboardData": dd_reg}
         if selected_object is not None:
             flt_reg["objectId"] = selected_object
+        if obj_nm:
+            flt_reg["objectName"] = obj_nm
         if selected_object is None:
             dd_fb: Dict[str, Any] = {"tableType": "data-console-home"}
             return "data-console/overview", "data-console-home", {**ctx, "dashboardData": dd_fb}
@@ -3429,7 +3593,14 @@ def _resolve_global_analysis_scope(
                 job,
                 request,
             )
-        dd_rep: Dict[str, Any] = {"tableType": "original-source", "dataSource": "AC"}
+        rs = str(ctx.get("reportSourceType") or "original-source").strip()
+        if rs not in ("original-source", "by-ar-resource"):
+            rs = "original-source"
+        dd_rep: Dict[str, Any] = (
+            {"tableType": "original-source", "dataSource": "AC"}
+            if rs == "original-source"
+            else {"tableType": "by-ar-resource", "dataSource": "DC"}
+        )
         if selected_for_job is not None:
             dd_rep["objectId"] = selected_for_job
         flt_rep: Dict[str, Any] = {**ctx, "dashboardData": dd_rep}
@@ -3438,8 +3609,10 @@ def _resolve_global_analysis_scope(
         if job:
             flt_rep["jobName"] = job
         if job and selected_for_job is not None:
-            return f"data-console/reports/original-source/jobs/{job}", "generic", flt_rep
-        return "data-console/reports/original-source", "jobs", flt_rep
+            seg = "original-source" if rs == "original-source" else "by-ar-resource"
+            return f"data-console/reports/{seg}/jobs/{job}", "generic", flt_rep
+        list_seg = "original-source" if rs == "original-source" else "by-ar-resource"
+        return f"data-console/reports/{list_seg}", "jobs", flt_rep
 
     if data_module == "security":
         sub = str(ctx.get("securitySubModule") or "users").strip().lower()
@@ -5323,7 +5496,7 @@ def _analysis_from_rows(
         "focus_column_summary": (summary.get("focus_column_summary") or {}) if isinstance(summary, dict) else {},
     }
     merged["analysisMeta"] = {
-        "dayKey": utc_day_key(),
+        "dayKey": PERSISTENT_AI_DAY_KEY,
         "rowsAnalyzed": int(len(df)),
         "anomalyRows": len(anomalies),
         "chunkCount": len(chunks),
@@ -5406,14 +5579,37 @@ def _run_dataset_snapshot_job(
     store: AIStateStore,
     payload: AnalyzeRequest,
     request: Optional[Request] = None,
+    import_ctx: Optional[Dict[str, Any]] = None,
 ) -> tuple[List[Dict[str, Any]], bool, Dict[str, Any]]:
-    day_key = utc_day_key()
+    if import_ctx and import_ctx.get("scope") and import_ctx.get("live_import"):
+        scope = import_ctx["scope"]
+        live = str(import_ctx["live_import"])
+        org = payload.orgId
+        pack = store.get_import_scoped_data(org, scope["kind"], scope["scope_key"])
+        if pack is not None:
+            stored_at, rows, meta, _p = pack
+            if stored_at == live:
+                return rows, True, meta if isinstance(meta, dict) else {}
+        snap_meta: Dict[str, Any] = {}
+        rows = _get_rows_for_payload(settings, payload, request, snapshot_meta_out=snap_meta)
+        store.save_import_scoped_data(
+            org,
+            scope["kind"],
+            scope["scope_key"],
+            live,
+            rows,
+            payload.pageId,
+            meta=snap_meta or None,
+        )
+        return rows, False, snap_meta
+
+    day_key = PERSISTENT_AI_DAY_KEY
     dataset_key = _dataset_key(payload, resolved_model_id=None)
     cached = store.get_dataset_snapshot(day_key, dataset_key)
     if cached is not None:
         rows, snap_meta = cached
         return rows, True, snap_meta
-    snap_meta: Dict[str, Any] = {}
+    snap_meta = {}
     rows = _get_rows_for_payload(settings, payload, request, snapshot_meta_out=snap_meta)
     store.save_dataset_snapshot(day_key, dataset_key, payload.pageId, rows, meta=snap_meta or None)
     return rows, False, snap_meta
@@ -5426,9 +5622,11 @@ def _ensure_daily_analysis(
     request: Request,
 ) -> Dict[str, Any]:
     model_id = _model_id_or_default(payload.modelId, settings, purpose="analysis")
-    day_key = utc_day_key()
+    day_key = PERSISTENT_AI_DAY_KEY
     analysis_dataset_key = _dataset_key(payload, resolved_model_id=model_id)
     session_key = _session_dataset_key(payload)
+    import_ctx = _build_import_aware_context(settings, payload, request)
+    insight_base_key = _import_insight_base_key(payload, model_id) if import_ctx else ""
 
     # Debug: trace what the sidecar is building for Insights.
     dbg_page_id = (payload.pageId or "").split("?", 1)[0].rstrip("/")
@@ -5450,7 +5648,13 @@ def _ensure_daily_analysis(
     )
     persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
     persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
-    cached = store.get_cached_analysis(day_key, analysis_dataset_key)
+    cached: Optional[Dict[str, Any]] = None
+    if import_ctx and insight_base_key:
+        got = store.get_import_scoped_insight(payload.orgId, payload.userId, insight_base_key)
+        if got and got[0] == import_ctx["live_import"]:
+            cached = got[1]
+    if cached is None and not import_ctx:
+        cached = store.get_cached_analysis(day_key, analysis_dataset_key)
     if cached:
         _strip_redundant_total_rows_kpi(cached)
         _dedupe_total_records_total_insights(cached)
@@ -5511,17 +5715,26 @@ def _ensure_daily_analysis(
             pass
         if _is_register_detailed_page_id(payload.pageId):
             try:
-                snapshot_ds_key = _dataset_key(payload, resolved_model_id=None)
-                ds = store.get_dataset_snapshot(day_key, snapshot_ds_key)
-                if ds:
-                    snap_rows, snap_meta = ds
+                snap_rows: Optional[List[Dict[str, Any]]] = None
+                snap_meta: Dict[str, Any] = {}
+                if import_ctx and import_ctx.get("scope"):
+                    sc = import_ctx["scope"]
+                    pack = store.get_import_scoped_data(payload.orgId, sc["kind"], sc["scope_key"])
+                    if pack:
+                        _, snap_rows, snap_meta, _ = pack
+                else:
+                    snapshot_ds_key = _dataset_key(payload, resolved_model_id=None)
+                    ds = store.get_dataset_snapshot(day_key, snapshot_ds_key)
+                    if ds:
+                        snap_rows, snap_meta = ds
+                if snap_rows is not None:
                     tr = (snap_meta or {}).get("registerTotalRecords")
                     if tr is not None:
                         _apply_authoritative_total_records_kpi(cached, int(tr), len(snap_rows))
             except Exception:
                 pass
         return cached
-    rows, _, snap_meta = _run_dataset_snapshot_job(settings, store, payload, request)
+    rows, _, snap_meta = _run_dataset_snapshot_job(settings, store, payload, request, import_ctx)
     authoritative_register_total: Optional[int] = None
     if isinstance(snap_meta, dict):
         tr_raw = snap_meta.get("registerTotalRecords")
@@ -5642,7 +5855,25 @@ def _ensure_daily_analysis(
             )
     except Exception:
         pass
-    store.save_cached_analysis(day_key, analysis_dataset_key, response, response.get("analysisSummary"))
+    try:
+        am = dict(response.get("analysisMeta") or {}) if isinstance(response.get("analysisMeta"), dict) else {}
+        am["importAwareCache"] = bool(import_ctx)
+        if import_ctx:
+            am["importFingerprint"] = str(import_ctx.get("live_import") or "")
+        response["analysisMeta"] = am
+    except Exception:
+        pass
+    if import_ctx and insight_base_key:
+        store.save_import_scoped_insight(
+            payload.orgId,
+            payload.userId,
+            insight_base_key,
+            str(import_ctx["live_import"]),
+            response,
+            response.get("analysisSummary"),
+        )
+    else:
+        store.save_cached_analysis(day_key, analysis_dataset_key, response, response.get("analysisSummary"))
     return response
 
 
@@ -5673,8 +5904,9 @@ def analyze(payload: AnalyzeRequest, request: Request, settings: Settings = Depe
 @app.post("/api/ai/chat")
 def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(get_settings)):
     store = get_store()
-    model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
-    day_key = utc_day_key()
+    chat_model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
+    analysis_model_id = _model_id_or_default(None, settings, purpose="analysis")
+    day_key = PERSISTENT_AI_DAY_KEY
     session_key = _session_dataset_key(payload)
     persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
     persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
@@ -5684,8 +5916,9 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
         pageId=payload.pageId,
         category=payload.category,
         filters=payload.filters,
-        modelId=model_id,
+        modelId=analysis_model_id,
         focusColumns=payload.focusColumns,
+        userName=payload.userName,
     )
     analysis = _ensure_daily_analysis(settings, store, analysis_payload, request)
     analysis_summary = analysis.get("analysisSummary", {})
@@ -5722,7 +5955,7 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
         },
     ]
     messages.extend(combined_history)
-    answer = _llm_chat(settings, model_id, messages, max_tokens=1600)
+    answer = _llm_chat(settings, chat_model_id, messages, max_tokens=1600)
     stored_history = (combined_history + [{"role": "assistant", "content": answer}])[-24:]
     store.save_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key, stored_history, analysis_summary)
     insight, charts_out = _build_chat_companion_payload(analysis, latest_user_question, answer)
@@ -5731,26 +5964,30 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
         "insight": insight,
         "charts": charts_out,
         "analysisMeta": analysis.get("analysisMeta", {}),
+        "analysis": analysis,
     }
 
 
 @app.post("/api/ai/global-chat")
 def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings = Depends(get_settings)):
     store = get_store()
-    model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
-    day_key = utc_day_key()
+    chat_model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
+    analysis_model_id = _model_id_or_default(None, settings, purpose="analysis")
+    day_key = PERSISTENT_AI_DAY_KEY
     persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
     persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
 
     resolved_page_id, resolved_category, resolved_filters = _resolve_global_analysis_scope(payload, settings, request)
+    ctx_un = str(payload.contextFilters.get("userName") or payload.userName or "").strip()
     analysis_payload = AnalyzeRequest(
         orgId=payload.orgId,
         userId=payload.userId,
         pageId=resolved_page_id,
         category=resolved_category,
         filters=resolved_filters,
-        modelId=model_id,
+        modelId=analysis_model_id,
         focusColumns=payload.focusColumns,
+        userName=ctx_un or payload.userName,
     )
     analysis = _ensure_daily_analysis(settings, store, analysis_payload, request)
     analysis_summary = analysis.get("analysisSummary", {})
@@ -5798,7 +6035,7 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
         },
     ]
     messages.extend(combined_history)
-    answer = _llm_chat(settings, model_id, messages, max_tokens=1700)
+    answer = _llm_chat(settings, chat_model_id, messages, max_tokens=1700)
     stored_history = (combined_history + [{"role": "assistant", "content": answer}])[-28:]
     store.save_chat_messages(
         day_key,
@@ -5826,13 +6063,14 @@ def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings
             "moduleKey": payload.moduleKey or "",
         },
         "analysisMeta": analysis.get("analysisMeta", {}),
+        "analysis": analysis,
     }
 
 
 @app.post("/api/ai/global-chat/clear")
 def clear_global_chat_session(payload: GlobalChatSessionRequest, settings: Settings = Depends(get_settings)):
     store = get_store()
-    day_key = utc_day_key()
+    day_key = PERSISTENT_AI_DAY_KEY
     model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
     resolved_page_id, resolved_category, resolved_filters = _resolve_global_analysis_scope(
         GlobalChatRequest(
@@ -5974,7 +6212,7 @@ def clear_chat_thread_only(payload: ChatSessionRequest):
     """Clear stored chat messages only; keep feedback and cached analysis."""
     _ensure_supported_page_id(payload.pageId)
     store = get_store()
-    day_key = utc_day_key()
+    day_key = PERSISTENT_AI_DAY_KEY
     session_key = _session_dataset_key(payload)
     store.clear_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
     return {
@@ -5983,16 +6221,45 @@ def clear_chat_thread_only(payload: ChatSessionRequest):
     }
 
 
+@app.post("/api/ai/chat/clear-memory")
+def clear_ai_chat_memory(payload: ChatSessionRequest, settings: Settings = Depends(get_settings)):
+    """
+    Clear persisted chat messages and insight feedback for this user + dataset scope.
+    Does not invalidate cached analysis or dataset snapshots (use Refresh insights / analysis invalidate for that).
+    """
+    _ensure_supported_page_id(payload.pageId)
+    store = get_store()
+    day_key = PERSISTENT_AI_DAY_KEY
+    session_key = _session_dataset_key(payload)
+    store.clear_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
+    store.clear_feedback(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
+    return {
+        "ok": True,
+        "message": "Chat memory and feedback cleared for this dataset. Cached insights are unchanged until you refresh.",
+    }
+
+
 @app.post("/api/ai/chat/clear")
 def clear_chat_session(payload: ChatSessionRequest, settings: Settings = Depends(get_settings)):
     _ensure_supported_page_id(payload.pageId)
     store = get_store()
-    day_key = utc_day_key()
+    day_key = PERSISTENT_AI_DAY_KEY
     session_key = _session_dataset_key(payload)
     model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
     analysis_dataset_key = _dataset_key(payload, resolved_model_id=model_id)
     snapshot_key = _dataset_key(payload, resolved_model_id=None)
+    flt = payload.filters or {}
+    pseudo = AnalyzeRequest(
+        orgId=payload.orgId,
+        userId=payload.userId,
+        pageId=payload.pageId,
+        category=payload.category or "generic",
+        filters=flt,
+        modelId=model_id,
+        userName=payload.userName or (flt.get("userName") if isinstance(flt.get("userName"), str) else None),
+    )
     store.clear_chat_messages(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
+    _clear_import_insight_for_payload(store, pseudo, model_id)
     store.clear_cached_analysis(day_key, analysis_dataset_key)
     store.clear_dataset_snapshot(day_key, snapshot_key)
     store.clear_feedback(day_key, payload.orgId, payload.userId, payload.pageId, session_key)
@@ -6030,7 +6297,7 @@ def ai_recommendations(payload: AnalyzeRequest, request: Request, settings: Sett
 def ai_feedback(payload: FeedbackRequest, settings: Settings = Depends(get_settings)):
     _ensure_supported_page_id(payload.pageId)
     store = get_store()
-    day_key = utc_day_key()
+    day_key = PERSISTENT_AI_DAY_KEY
     pseudo = AnalyzeRequest(
         orgId=payload.orgId,
         userId=payload.userId,
@@ -6051,13 +6318,30 @@ def ai_feedback(payload: FeedbackRequest, settings: Settings = Depends(get_setti
     return {"ok": True, "message": "Feedback recorded."}
 
 
+def _clear_import_insight_for_payload(store: AIStateStore, payload: AnalyzeRequest, model_id: str) -> bool:
+    if not _import_aware_scope_from_payload(payload):
+        return False
+    if not _resolve_user_name_for_status(payload):
+        return False
+    ibk = _import_insight_base_key(payload, model_id)
+    if not ibk:
+        return False
+    store.clear_import_scoped_insight(payload.orgId, payload.userId, ibk)
+    return True
+
+
 @app.post("/api/ai/analysis/invalidate")
 def invalidate_analysis_cache(payload: AnalyzeRequest, settings: Settings = Depends(get_settings)):
     """Invalidate cached analysis for this dataset so the next analyze re-runs with same data."""
     _ensure_supported_page_id(payload.pageId)
     store = get_store()
-    day_key = utc_day_key()
+    day_key = PERSISTENT_AI_DAY_KEY
     model_id = _model_id_or_default(payload.modelId, settings, purpose="analysis")
+    if _clear_import_insight_for_payload(store, payload, model_id):
+        return {
+            "ok": True,
+            "message": "Import-scoped insight cache cleared. Next analyze will re-run with current data.",
+        }
     dataset_key = _dataset_key(payload, resolved_model_id=model_id)
     store.clear_cached_analysis(day_key, dataset_key)
     return {"ok": True, "message": "Analysis cache invalidated. Next analyze will re-run."}

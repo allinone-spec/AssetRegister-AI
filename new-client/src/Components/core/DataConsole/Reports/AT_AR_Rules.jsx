@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
 import { setHeadingTitle } from "../../../../redux/Slices/HeadingTitle";
@@ -10,7 +10,13 @@ import { setFilters } from "../../../../redux/Slices/AdvancedFilterSlice";
 import GridButton from "../../../Common/GridButton";
 import LoadingBar from "../../../Common/LoadingBar";
 
-const AT_AR_Rules = ({ routeName, setEditJob, setOpenDrawer }) => {
+const AT_AR_Rules = ({
+  routeName,
+  setEditJob,
+  setOpenDrawer,
+  openJobNameFromQuery,
+}) => {
+  const insightJobOpenedRef = useRef(false);
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const selectedObject = useSelector((state) => state.selectedObject.value);
@@ -61,6 +67,24 @@ const AT_AR_Rules = ({ routeName, setEditJob, setOpenDrawer }) => {
           .sort((a, b) => a.priority - b.priority)
       : data.sort((a, b) => a.priority - b.priority);
   }, [selectedObject, data]);
+
+  useEffect(() => {
+    insightJobOpenedRef.current = false;
+  }, [openJobNameFromQuery]);
+
+  useEffect(() => {
+    if (!openJobNameFromQuery || !rows?.length || insightJobOpenedRef.current)
+      return;
+    const match = rows.find(
+      (r) =>
+        String(r.jobName || "").trim() === String(openJobNameFromQuery).trim(),
+    );
+    if (match) {
+      insightJobOpenedRef.current = true;
+      setOpenDrawer(match);
+      setEditJob(true);
+    }
+  }, [openJobNameFromQuery, rows, setOpenDrawer, setEditJob]);
 
   const navigateEditHandler = (row) => {
     setOpenDrawer(row);

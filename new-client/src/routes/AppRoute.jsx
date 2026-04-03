@@ -4,15 +4,12 @@ import {
   useLocation,
   Navigate,
   useNavigate,
+  useParams,
 } from "react-router-dom";
 
 import Layout from "../Components/Common/Layout";
-import UserTable from "../Components/core/DataConsole/Security/UserTable";
 import ColorSelector from "../pages/ColorThemeSelector";
 import NewDashboard from "../Components/core/DataConsole/CreateDashboard/index";
-import RoleTable from "../Components/core/DataConsole/Security/Role";
-import PermissionTypeTable from "../Components/core/DataConsole/Security/PermissionType";
-import GroupsTable from "../Components/core/DataConsole/Security/Groups";
 
 import {
   AWSVM,
@@ -42,7 +39,6 @@ import FolderFilterView from "../Components/core/DataConsole/Reports/FoIderFilte
 import ARTable from "../Components/core/AdminConsole/ARMapping/Table";
 import { LoginPage } from "../pages/LoginPage";
 import { Commom_Saved_Job } from "../Components/Common/Commom_Saved_Job";
-import ReportsCommonTable from "../Components/core/DataConsole/Reports/JobData_Rules";
 import ARRulesConfig from "../Components/core/AdminConsole/ARRules/ARRulesManager";
 import FilterComponent from "../pages/AdvanceFilteration";
 import AddSsoForm from "../Components/core/AdminConsole/Sso/AddSSoForm";
@@ -53,7 +49,6 @@ import { ScheduledEmailsTable } from "../Components/core/AdminConsole/ScheduledE
 import UserProfile from "../pages/UserProfile";
 import DataConsoleWelcomePage from "../pages/DataConsoleLandingPage";
 import AdminConsoleWelcomePage from "../pages/AdminConsoleLandingPage";
-import { Register } from "../Components/core/DataConsole/Register/Register";
 import ImportStatus from "../Components/core/AdminConsole/ImportStatus/ImportStatus";
 import ObjectConfig from "../Components/core/DataConsole/Settings/ObjectConfiguration";
 import ApplicationMenu from "../Components/core/AdminConsole/Jobs/MenuPage";
@@ -72,13 +67,24 @@ import LogsScreen from "../Components/core/AdminConsole/LogModule/LogsScreen";
 import Summary from "../Components/core/DataConsole/Register/Summary";
 import { postAdminRequest } from "../Service/admin.save";
 import SettingsPage from "../Components/Common/settings/SettingsPage";
-import AiPromptSettings from "../Components/core/AdminConsole/Settings/AiPromptSettings";
-import AiModelSettings from "../Components/core/AdminConsole/Settings/AiModelSettings";
 import SecurityPage from "../Components/Common/security/SecurityPage";
 import RegisterPage from "../Components/Common/register/RegisterPage";
 import ReportsPage from "../Components/Reports/ReportsPage";
 import DashboardPage from "../Components/Dashboard/DashboardPage";
 import ChartAndReportViewer from "../pages/ChartAndReportViewer";
+
+/** Legacy job URLs → reports hub `?source=` + job in location state (no `job` query; avoids replace churn). */
+const ReportsJobRedirect = ({ segment }) => {
+  const { jobName } = useParams();
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigate(`/data-console/reports?source=${segment}`, {
+      replace: true,
+      state: jobName ? { openReportInsightJob: jobName } : undefined,
+    });
+  }, [segment, jobName, navigate]);
+  return null;
+};
 
 const UnauthorizedPage = () => {
   return (
@@ -538,19 +544,7 @@ const AppRoute = () => {
                 />
                 <Route
                   path="register/detailed"
-                  element={
-                    <ProtectedRoute
-                      element={<Register routeName="Register" />}
-                      type={
-                        permissionDetails?.Register?.permissionTypes.find(
-                          (v) => v === "ReadOnly" || v === "WriteOnly",
-                        )
-                          ? permissionDetails?.Register?.permissionTypes[0]
-                          : false
-                      }
-                      routeName="Register"
-                    />
-                  }
+                  element={<Navigate to="/data-console/register?tab=detailed" replace />}
                 />
                 {/* <Route path="security/add-sso-configure" element={<AddSsoForm />}></Route> */}
                 <Route
@@ -573,7 +567,7 @@ const AppRoute = () => {
                   path="security/users"
                   element={
                     <ProtectedRoute
-                      element={<UserTable routeName="Security" />}
+                      element={<Navigate to="/data-console/security?section=users" replace />}
                       type={
                         permissionDetails?.Security?.permissionTypes.find(
                           (v) => v === "ReadOnly" || v === "WriteOnly",
@@ -589,7 +583,7 @@ const AppRoute = () => {
                   path="security/roles"
                   element={
                     <ProtectedRoute
-                      element={<RoleTable routeName="Security" />}
+                      element={<Navigate to="/data-console/security?section=roles" replace />}
                       type={
                         permissionDetails?.Security?.permissionTypes.find(
                           (v) => v === "ReadOnly" || v === "WriteOnly",
@@ -605,7 +599,7 @@ const AppRoute = () => {
                   path="security/permission"
                   element={
                     <ProtectedRoute
-                      element={<PermissionTypeTable routeName="Security" />}
+                      element={<Navigate to="/data-console/security?section=permissions" replace />}
                       type={
                         permissionDetails?.Security?.permissionTypes.find(
                           (v) => v === "ReadOnly" || v === "WriteOnly",
@@ -649,7 +643,24 @@ const AppRoute = () => {
                   path="security/groups"
                   element={
                     <ProtectedRoute
-                      element={<GroupsTable routeName="Security" />}
+                      element={<Navigate to="/data-console/security?section=groups" replace />}
+                      type={
+                        permissionDetails?.Security?.permissionTypes.find(
+                          (v) => v === "ReadOnly" || v === "WriteOnly",
+                        )
+                          ? permissionDetails?.Security?.permissionTypes[0]
+                          : false
+                      }
+                      routeName="Security"
+                    />
+                  }
+                />
+                {/* Hub: /data-console/security — left nav + grid (FileExplorerData); must follow more specific security/* routes. */}
+                <Route
+                  path="security"
+                  element={
+                    <ProtectedRoute
+                      element={<SecurityPage routeName="Security" />}
                       type={
                         permissionDetails?.Security?.permissionTypes.find(
                           (v) => v === "ReadOnly" || v === "WriteOnly",
@@ -712,13 +723,7 @@ const AppRoute = () => {
                   path="reports/original-source/jobs/:jobName"
                   element={
                     <ProtectedRoute
-                      element={
-                        <ReportsCommonTable
-                          routeName="Reports"
-                          title="Original Source"
-                          type="getAC"
-                        />
-                      }
+                      element={<ReportsJobRedirect segment="original-source" />}
                       type={
                         permissionDetails?.Reports?.permissionTypes.find(
                           (v) => v === "ReadOnly" || v === "WriteOnly",
@@ -734,13 +739,7 @@ const AppRoute = () => {
                   path="reports/by-ar-resource/jobs/:jobName"
                   element={
                     <ProtectedRoute
-                      element={
-                        <ReportsCommonTable
-                          routeName="Reports"
-                          title="By AR Source"
-                          type="getDC"
-                        />
-                      }
+                      element={<ReportsJobRedirect segment="by-ar-resource" />}
                       type={
                         permissionDetails?.Reports?.permissionTypes.find(
                           (v) => v === "ReadOnly" || v === "WriteOnly",
@@ -898,33 +897,13 @@ const AppRoute = () => {
                 <Route
                   path="settings/ai-prompts"
                   element={
-                    <ProtectedRoute
-                      element={<AiPromptSettings routeName="Settings" />}
-                      type={
-                        permissionDetails?.Settings?.permissionTypes.find(
-                          (v) => v === "ReadOnly" || v === "WriteOnly",
-                        )
-                          ? permissionDetails?.Settings?.permissionTypes[0]
-                          : false
-                      }
-                      routeName="Settings"
-                    />
+                    <Navigate to="/data-console/settings?tab=ai-prompts" replace />
                   }
                 />
                 <Route
                   path="settings/ai-model"
                   element={
-                    <ProtectedRoute
-                      element={<AiModelSettings routeName="Settings" />}
-                      type={
-                        permissionDetails?.Settings?.permissionTypes.find(
-                          (v) => v === "ReadOnly" || v === "WriteOnly",
-                        )
-                          ? permissionDetails?.Settings?.permissionTypes[0]
-                          : false
-                      }
-                      routeName="Settings"
-                    />
+                    <Navigate to="/data-console/settings?tab=ai-model" replace />
                   }
                 />
                 <Route
@@ -1457,33 +1436,13 @@ const AppRoute = () => {
                 <Route
                   path="settings/ai-prompts"
                   element={
-                    <ProtectedRoute
-                      element={<AiPromptSettings routeName="Settings" />}
-                      type={
-                        permissionDetails?.Settings?.permissionTypes.find(
-                          (v) => v === "ReadOnly" || v === "WriteOnly",
-                        )
-                          ? permissionDetails?.Settings?.permissionTypes[0]
-                          : false
-                      }
-                      routeName="Settings"
-                    />
+                    <Navigate to="/admin-console/settings?tab=ai-prompts" replace />
                   }
                 />
                 <Route
                   path="settings/ai-model"
                   element={
-                    <ProtectedRoute
-                      element={<AiModelSettings routeName="Settings" />}
-                      type={
-                        permissionDetails?.Settings?.permissionTypes.find(
-                          (v) => v === "ReadOnly" || v === "WriteOnly",
-                        )
-                          ? permissionDetails?.Settings?.permissionTypes[0]
-                          : false
-                      }
-                      routeName="Settings"
-                    />
+                    <Navigate to="/admin-console/settings?tab=ai-model" replace />
                   }
                 />
                 <Route

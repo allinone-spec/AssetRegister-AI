@@ -133,7 +133,7 @@ export const SaveFilterModal = ({
     setLoading(true);
     try {
       const response = await postDataRequest(
-        pathname === "/data-console/register/detailed"
+        pathname === "/data-console/register" || pathname === "/data-console/register/detailed"
           ? "/view/saved/register"
           : "/view/saved",
         { ...formData, viewName: formData?.viewName.trim() },

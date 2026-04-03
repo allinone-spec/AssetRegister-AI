@@ -86,8 +86,8 @@ const adminConsoleSidebarData = [
         path: "/admin-console/settings/scheduled-emails",
       },
       { title: "Object", path: "/admin-console/settings/object-configuration" },
-      { title: "AI Prompts", path: "/admin-console/settings/ai-prompts" },
-      { title: "AI Model", path: "/admin-console/settings/ai-model" },
+      { title: "AI Prompts", path: "/admin-console/settings?tab=ai-prompts" },
+      { title: "AI Model", path: "/admin-console/settings?tab=ai-model" },
 
       // { title: "Theme", path: "/admin-console/security/theme-selector" },
     ],

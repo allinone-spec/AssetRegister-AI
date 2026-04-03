@@ -11,6 +11,11 @@ def utc_day_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+# Stable SQLite partition for per-user, per-dataset AI state (chat, feedback, analysis cache, snapshots).
+# Using a single bucket replaces daily rotation so history and insights survive until explicit clear/refresh.
+PERSISTENT_AI_DAY_KEY = "persist"
+
+
 class AIStateStore:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -76,6 +81,29 @@ class AIStateStore:
                     setting_key TEXT PRIMARY KEY,
                     setting_value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS import_scoped_data (
+                    org_id TEXT NOT NULL,
+                    scope_kind TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    rows_json TEXT NOT NULL,
+                    meta_json TEXT,
+                    page_id TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (org_id, scope_kind, scope_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS import_scoped_insight (
+                    org_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    insight_base_key TEXT NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    analysis_summary_json TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (org_id, user_id, insight_base_key)
                 );
                 """
             )
@@ -206,14 +234,18 @@ class AIStateStore:
         page_id: str,
         dataset_key: str,
     ) -> List[Dict[str, str]]:
+        """Returns the most recent stored thread for this scope (ignores legacy per-day rows)."""
+        del day_key  # partition is now PERSISTENT_AI_DAY_KEY; keep param for API compatibility
         with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT messages_json
                 FROM chat_sessions
-                WHERE day_key = ? AND org_id = ? AND user_id = ? AND page_id = ? AND dataset_key = ?
+                WHERE org_id = ? AND user_id = ? AND page_id = ? AND dataset_key = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
                 """,
-                (day_key, org_id, user_id, page_id, dataset_key),
+                (org_id, user_id, page_id, dataset_key),
             ).fetchone()
         return json.loads(row["messages_json"]) if row else []
 
@@ -261,13 +293,15 @@ class AIStateStore:
         page_id: str,
         dataset_key: str,
     ) -> None:
+        """Removes all stored threads for this scope (including legacy daily partitions)."""
+        del day_key
         with self._connect() as conn:
             conn.execute(
                 """
                 DELETE FROM chat_sessions
-                WHERE day_key = ? AND org_id = ? AND user_id = ? AND page_id = ? AND dataset_key = ?
+                WHERE org_id = ? AND user_id = ? AND page_id = ? AND dataset_key = ?
                 """,
-                (day_key, org_id, user_id, page_id, dataset_key),
+                (org_id, user_id, page_id, dataset_key),
             )
 
     def list_recent_user_chat_messages(
@@ -339,15 +373,17 @@ class AIStateStore:
         page_id: str,
         dataset_key: str,
     ) -> List[Dict[str, Any]]:
+        """All feedback events for this scope (any legacy day partition)."""
+        del day_key
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT payload_json
                 FROM feedback
-                WHERE day_key = ? AND org_id = ? AND user_id = ? AND page_id = ? AND dataset_key = ?
+                WHERE org_id = ? AND user_id = ? AND page_id = ? AND dataset_key = ?
                 ORDER BY created_at ASC
                 """,
-                (day_key, org_id, user_id, page_id, dataset_key),
+                (org_id, user_id, page_id, dataset_key),
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
 
@@ -394,13 +430,169 @@ class AIStateStore:
         page_id: str,
         dataset_key: str,
     ) -> None:
+        """Removes all feedback rows for this scope (including legacy daily partitions)."""
+        del day_key
         with self._connect() as conn:
             conn.execute(
                 """
                 DELETE FROM feedback
-                WHERE day_key = ? AND org_id = ? AND user_id = ? AND page_id = ? AND dataset_key = ?
+                WHERE org_id = ? AND user_id = ? AND page_id = ? AND dataset_key = ?
                 """,
-                (day_key, org_id, user_id, page_id, dataset_key),
+                (org_id, user_id, page_id, dataset_key),
+            )
+
+    def get_import_scoped_data(
+        self, org_id: str, scope_kind: str, scope_key: str
+    ) -> Optional[tuple[str, List[Dict[str, Any]], Dict[str, Any], str]]:
+        """Returns (imported_at, rows, meta, page_id) or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT imported_at, rows_json, meta_json, page_id
+                FROM import_scoped_data
+                WHERE org_id = ? AND scope_kind = ? AND scope_key = ?
+                """,
+                (org_id, scope_kind, scope_key),
+            ).fetchone()
+        if not row:
+            return None
+        meta: Dict[str, Any] = {}
+        raw_meta = row["meta_json"]
+        if raw_meta:
+            try:
+                parsed = json.loads(raw_meta)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except json.JSONDecodeError:
+                pass
+        rows = json.loads(row["rows_json"])
+        if not isinstance(rows, list):
+            rows = []
+        return (
+            str(row["imported_at"] or ""),
+            rows,
+            meta,
+            str(row["page_id"] or ""),
+        )
+
+    def save_import_scoped_data(
+        self,
+        org_id: str,
+        scope_kind: str,
+        scope_key: str,
+        imported_at: str,
+        rows: List[Dict[str, Any]],
+        page_id: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        meta_json = json.dumps(meta) if meta else None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO import_scoped_data (
+                    org_id, scope_kind, scope_key, imported_at, rows_json, meta_json, page_id, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(org_id, scope_kind, scope_key) DO UPDATE SET
+                    imported_at = excluded.imported_at,
+                    rows_json = excluded.rows_json,
+                    meta_json = excluded.meta_json,
+                    page_id = excluded.page_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    org_id,
+                    scope_kind,
+                    scope_key,
+                    imported_at,
+                    json.dumps(rows),
+                    meta_json,
+                    page_id,
+                    now,
+                ),
+            )
+
+    def clear_import_scoped_data(self, org_id: str, scope_kind: str, scope_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM import_scoped_data
+                WHERE org_id = ? AND scope_kind = ? AND scope_key = ?
+                """,
+                (org_id, scope_kind, scope_key),
+            )
+
+    def get_import_scoped_insight(
+        self, org_id: str, user_id: str, insight_base_key: str
+    ) -> Optional[tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]]:
+        """Returns (imported_at, response, analysis_summary) or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT imported_at, response_json, analysis_summary_json
+                FROM import_scoped_insight
+                WHERE org_id = ? AND user_id = ? AND insight_base_key = ?
+                """,
+                (org_id, user_id, insight_base_key),
+            ).fetchone()
+        if not row:
+            return None
+        summary = None
+        if row["analysis_summary_json"]:
+            try:
+                summary = json.loads(row["analysis_summary_json"])
+            except json.JSONDecodeError:
+                summary = None
+        return (
+            str(row["imported_at"] or ""),
+            json.loads(row["response_json"]),
+            summary,
+        )
+
+    def save_import_scoped_insight(
+        self,
+        org_id: str,
+        user_id: str,
+        insight_base_key: str,
+        imported_at: str,
+        response: Dict[str, Any],
+        analysis_summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO import_scoped_insight (
+                    org_id, user_id, insight_base_key, imported_at,
+                    response_json, analysis_summary_json, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(org_id, user_id, insight_base_key) DO UPDATE SET
+                    imported_at = excluded.imported_at,
+                    response_json = excluded.response_json,
+                    analysis_summary_json = excluded.analysis_summary_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    org_id,
+                    user_id,
+                    insight_base_key,
+                    imported_at,
+                    json.dumps(response),
+                    json.dumps(analysis_summary) if analysis_summary is not None else None,
+                    now,
+                ),
+            )
+
+    def clear_import_scoped_insight(self, org_id: str, user_id: str, insight_base_key: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM import_scoped_insight
+                WHERE org_id = ? AND user_id = ? AND insight_base_key = ?
+                """,
+                (org_id, user_id, insight_base_key),
             )
 
     def get_app_prompt(self, prompt_key: str) -> Optional[str]:

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import PageLayout from "../PageLayout";
 import RegisterSidebar from "./RegisterSidebar";
 import Summary from "../../core/DataConsole/Register/Summary";
@@ -6,7 +7,16 @@ import { Register } from "../../core/DataConsole/Register/Register";
 import { RegisterDrawer } from "../sideDrawer/RegisterDrawer";
 
 export default function RegisterPage() {
-  const [activeTab, setActiveTab] = useState("Summary");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState(() =>
+    searchParams.get("tab") === "detailed" ? "Detailed" : "Summary",
+  );
+
+  useEffect(() => {
+    const t = searchParams.get("tab");
+    if (t === "detailed") setActiveTab("Detailed");
+    else setActiveTab("Summary");
+  }, [searchParams]);
   const [editJob, setEditJob] = useState(false);
   const [openDrawer, setOpenDrawer] = useState(null);
   const [summaryDrawerData, setSummaryDrawerData] = useState(null);
@@ -42,12 +52,20 @@ export default function RegisterPage() {
         );
     }
   };
-  const activeTabHandler = (val) => {
-    setActiveTab(val);
-    setEditJob(false);
-    setOpenDrawer(null);
-    setSummaryDrawerData(null);
-  };
+  const activeTabHandler = useCallback(
+    (val) => {
+      setActiveTab(val);
+      setEditJob(false);
+      setOpenDrawer(null);
+      setSummaryDrawerData(null);
+      if (val === "Detailed") {
+        setSearchParams({ tab: "detailed" }, { replace: true });
+      } else {
+        setSearchParams({}, { replace: true });
+      }
+    },
+    [setSearchParams],
+  );
 
   return (
     <div className="flex">

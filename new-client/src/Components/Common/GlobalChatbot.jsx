@@ -46,6 +46,12 @@ const SECURITY_SUBS = [
   { id: "permissions", label: "Permissions" },
 ];
 
+/** Matches report job URL segments and DataTable `dashboardData.tableType` */
+const REPORT_SOURCE_TYPES = [
+  { id: "original-source", label: "Original source" },
+  { id: "by-ar-resource", label: "By AR source" },
+];
+
 const buildChatMessageId = () => `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const canRenderChart = (chart) => {
   const labels = Array.isArray(chart?.xAxis) ? chart.xAxis : [];
@@ -72,6 +78,7 @@ const GlobalChatbot = () => {
   const [dataModule, setDataModule] = useState("dashboards");
   const [adminModule, setAdminModule] = useState("dashboards");
   const [reportJobName, setReportJobName] = useState("");
+  const [reportSourceType, setReportSourceType] = useState("original-source");
   const [securitySubModule, setSecuritySubModule] = useState("users");
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
@@ -84,6 +91,8 @@ const GlobalChatbot = () => {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [selectedModelId, setSelectedModelId] = useState("");
   const [kpiTitleActions, setKpiTitleActions] = useState({});
+  /** Latest /api/ai/global-chat `analysis` payload — hydrates insight panel instantly on Go to insight. */
+  const [lastScopedAnalysis, setLastScopedAnalysis] = useState(null);
   const effectiveUserId = user?.id || localStorage.getItem("user-id") || "anonymous";
   const globalChatStateKey = useMemo(
     () => `global-chatbot-state-v3:${String(effectiveUserId)}`,
@@ -105,6 +114,7 @@ const GlobalChatbot = () => {
       setDataModule(saved.dataModule || "dashboards");
       setAdminModule(saved.adminModule || "dashboards");
       setReportJobName(saved.reportJobName || "");
+      setReportSourceType(saved.reportSourceType || "original-source");
       setSecuritySubModule(saved.securitySubModule || "users");
       setSelectedModelId(saved.selectedModelId || "");
       setKpiTitleActions(saved.kpiTitleActions || {});
@@ -126,6 +136,7 @@ const GlobalChatbot = () => {
           dataModule,
           adminModule,
           reportJobName,
+          reportSourceType,
           securitySubModule,
           selectedModelId,
           kpiTitleActions,
@@ -157,6 +168,7 @@ const GlobalChatbot = () => {
     dataModule,
     adminModule,
     reportJobName,
+    reportSourceType,
     securitySubModule,
     selectedModelId,
     kpiTitleActions,
@@ -273,8 +285,13 @@ const GlobalChatbot = () => {
       return { ...base, adminModule };
     }
     const out = { ...base, dataModule };
-    if (dataModule === "reports" && reportJobName) {
-      out.reportJobName = reportJobName;
+    if (dataModule === "reports") {
+      out.reportSourceType = reportSourceType;
+      if (reportJobName) out.reportJobName = reportJobName;
+    }
+    if (dataModule === "register" && chatObjectId !== ALL_OBJECT) {
+      const on = objects.find((o) => String(o.objectId) === String(chatObjectId))?.objectName;
+      if (on) out.objectName = on;
     }
     if (dataModule === "security") {
       out.securitySubModule = securitySubModule;
@@ -282,12 +299,15 @@ const GlobalChatbot = () => {
     return out;
   }, [
     resolvedObjectId,
+    chatObjectId,
+    objects,
     user?.email,
     user?.userName,
     consoleType,
     adminModule,
     dataModule,
     reportJobName,
+    reportSourceType,
     securitySubModule,
   ]);
 
@@ -302,9 +322,11 @@ const GlobalChatbot = () => {
     }
     if (consoleType !== "data") return "";
     if (dataModule === "reports") {
-      return reportJobName
-        ? `/data-console/reports/original-source/jobs/${reportJobName}`
-        : "/data-console/reports/original-source";
+      if (!reportJobName) {
+        return "/data-console/reports";
+      }
+      const segment = reportSourceType === "by-ar-resource" ? "by-ar-resource" : "original-source";
+      return `/data-console/reports/${segment}/jobs/${reportJobName}`;
     }
     if (dataModule === "register") return "/data-console/register/detailed";
     if (dataModule === "security") {
@@ -314,7 +336,7 @@ const GlobalChatbot = () => {
     }
     if (dataModule === "dashboards") return "/data-console";
     return "";
-  }, [consoleType, adminModule, dataModule, reportJobName, securitySubModule]);
+  }, [consoleType, adminModule, dataModule, reportJobName, reportSourceType, securitySubModule]);
 
   const canStartChat = useMemo(() => {
     if (modelsLoading) return false;
@@ -346,7 +368,11 @@ const GlobalChatbot = () => {
     }
     const m = DATA_MODULES.find((x) => x.id === dataModule);
     let tail = m?.label || dataModule;
-    if (dataModule === "reports" && reportJobName) tail += ` · Job: ${reportJobName}`;
+    if (dataModule === "reports") {
+      const rs = REPORT_SOURCE_TYPES.find((x) => x.id === reportSourceType);
+      if (rs) tail += ` · ${rs.label}`;
+      if (reportJobName) tail += ` · Job: ${reportJobName}`;
+    }
     if (dataModule === "security") {
       const s = SECURITY_SUBS.find((x) => x.id === securitySubModule);
       tail += ` · ${s?.label || securitySubModule}`;
@@ -364,6 +390,7 @@ const GlobalChatbot = () => {
     adminModule,
     dataModule,
     reportJobName,
+    reportSourceType,
     securitySubModule,
     selectedModelId,
     aiModels,
@@ -394,9 +421,12 @@ const GlobalChatbot = () => {
     }
     const m = DATA_MODULES.find((x) => x.id === dataModule);
     const parts = [objTag, "Data", m?.label || dataModule];
-    if (dataModule === "reports" && reportJobName) {
-      const jn = reportJobName.length > 18 ? `${reportJobName.slice(0, 16)}…` : reportJobName;
-      parts.push(jn);
+    if (dataModule === "reports") {
+      parts.push(reportSourceType === "by-ar-resource" ? "By AR" : "Original");
+      if (reportJobName) {
+        const jn = reportJobName.length > 18 ? `${reportJobName.slice(0, 16)}…` : reportJobName;
+        parts.push(jn);
+      }
     }
     if (dataModule === "security") {
       const s = SECURITY_SUBS.find((x) => x.id === securitySubModule);
@@ -419,6 +449,7 @@ const GlobalChatbot = () => {
     adminModule,
     dataModule,
     reportJobName,
+    reportSourceType,
     securitySubModule,
     selectedModelId,
     aiModels,
@@ -439,9 +470,11 @@ const GlobalChatbot = () => {
         moduleKey: moduleKeyForApi,
         route: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
         contextFilters,
+        userName: user?.email || user?.userName || undefined,
         modelId: selectedModelId || undefined,
         messages: [{ role: "user", content: introQuestion }],
       });
+      setLastScopedAnalysis(res?.analysis && typeof res.analysis === "object" ? res.analysis : null);
       setMessages([
         {
           messageId: buildChatMessageId(),
@@ -459,6 +492,7 @@ const GlobalChatbot = () => {
         },
       ]);
     } catch (err) {
+      setLastScopedAnalysis(null);
       setMessages([
         {
           messageId: buildChatMessageId(),
@@ -558,6 +592,21 @@ const GlobalChatbot = () => {
   const handleGoToInsight = useCallback(() => {
     if (!canGoToInsight || !insightTargetRoute) return;
     const path = canonicalInsightTargetRoute(insightTargetRoute);
+    let navigatePath = path;
+    if (dataModule === "register") {
+      navigatePath = "/data-console/register?tab=detailed";
+    } else if (dataModule === "reports") {
+      const seg =
+        reportSourceType === "by-ar-resource" ? "by-ar-resource" : "original-source";
+      const sp = new URLSearchParams();
+      sp.set("source", seg);
+      navigatePath = `/data-console/reports?${sp.toString()}`;
+    } else if (dataModule === "security") {
+      const sub = securitySubModule || "users";
+      const sp = new URLSearchParams();
+      sp.set("section", sub);
+      navigatePath = `/data-console/security?${sp.toString()}`;
+    }
     saveGlobalChatInsightNav({
       route: path,
       objectId: resolvedObjectId,
@@ -565,9 +614,28 @@ const GlobalChatbot = () => {
         objects.find((o) => String(o.objectId) === String(resolvedObjectId))?.objectName || "",
       kpis: [],
       addedInsights: [],
+      seedAnalysis: lastScopedAnalysis,
     });
-    navigate(path);
-  }, [canGoToInsight, insightTargetRoute, resolvedObjectId, objects, navigate]);
+    navigate(navigatePath, {
+      state:
+        dataModule === "reports" && reportJobName
+          ? { openReportInsightJob: reportJobName }
+          : dataModule === "security"
+            ? { openSecurityInsightSection: securitySubModule || "users" }
+            : undefined,
+    });
+  }, [
+    canGoToInsight,
+    insightTargetRoute,
+    dataModule,
+    reportJobName,
+    reportSourceType,
+    securitySubModule,
+    resolvedObjectId,
+    objects,
+    navigate,
+    lastScopedAnalysis,
+  ]);
 
   const handleSend = async () => {
     const question = chatInput.trim();
@@ -585,9 +653,11 @@ const GlobalChatbot = () => {
         moduleKey: moduleKeyForApi,
         route: location.pathname.startsWith("/") ? location.pathname.slice(1) : location.pathname,
         contextFilters,
+        userName: user?.email || user?.userName || undefined,
         modelId: selectedModelId || undefined,
         messages: newMsgs.slice(-16),
       });
+      setLastScopedAnalysis(res?.analysis && typeof res.analysis === "object" ? res.analysis : null);
       setMessages((prev) => [
         ...prev,
         {
@@ -645,6 +715,7 @@ const GlobalChatbot = () => {
     setOnboardDone(false);
     setChatInput("");
     setKpiTitleActions({});
+    setLastScopedAnalysis(null);
     try {
       await clearGlobalChatSession(clearPayload);
     } catch (e) {
@@ -657,6 +728,7 @@ const GlobalChatbot = () => {
     setOnboardDone(false);
     setChatInput("");
     setKpiTitleActions({});
+    setLastScopedAnalysis(null);
   };
 
   return (
@@ -821,26 +893,47 @@ const GlobalChatbot = () => {
               </div>
 
               {consoleType === "data" && dataModule === "reports" && (
-                <div className="space-y-1.5">
-                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-text-faint">4 · Job name</label>
-                  <Select
-                    size="small"
-                    fullWidth
-                    value={reportJobName}
-                    disabled={jobsLoading}
-                    onChange={(e) => setReportJobName(e.target.value)}
-                  >
-                    {filteredJobRows.map((row) => {
-                      const name = row?.jobName ?? row?.name ?? String(row);
-                      return (
-                        <MenuItem key={name} value={name}>
-                          {name}
+                <>
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-semibold uppercase tracking-wide text-text-faint">
+                      4 · Report source
+                    </label>
+                    <Select
+                      size="small"
+                      fullWidth
+                      value={reportSourceType}
+                      onChange={(e) => setReportSourceType(e.target.value)}
+                    >
+                      {REPORT_SOURCE_TYPES.map((opt) => (
+                        <MenuItem key={opt.id} value={opt.id}>
+                          {opt.label}
                         </MenuItem>
-                      );
-                    })}
-                  </Select>
-                  {jobsLoading && <div className="text-[10px] text-text-faint">Loading jobs…</div>}
-                </div>
+                      ))}
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-semibold uppercase tracking-wide text-text-faint">
+                      5 · Job name
+                    </label>
+                    <Select
+                      size="small"
+                      fullWidth
+                      value={reportJobName}
+                      disabled={jobsLoading}
+                      onChange={(e) => setReportJobName(e.target.value)}
+                    >
+                      {filteredJobRows.map((row) => {
+                        const name = row?.jobName ?? row?.name ?? String(row);
+                        return (
+                          <MenuItem key={name} value={name}>
+                            {name}
+                          </MenuItem>
+                        );
+                      })}
+                    </Select>
+                    {jobsLoading && <div className="text-[10px] text-text-faint">Loading jobs…</div>}
+                  </div>
+                </>
               )}
 
               {consoleType === "data" && dataModule === "security" && (
@@ -863,7 +956,9 @@ const GlobalChatbot = () => {
 
               {aiModels.length > 0 && (
                 <div className="space-y-1.5">
-                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-text-faint">4 · Model</label>
+                  <label className="block text-[11px] font-semibold uppercase tracking-wide text-text-faint">
+                    {consoleType === "data" && dataModule === "reports" ? "6 · Model" : "4 · Model"}
+                  </label>
                   <FormControl size="small" fullWidth disabled={modelsLoading}>
                     <InputLabel id="global-chat-model-label">Cloud AI model</InputLabel>
                     <Select

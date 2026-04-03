@@ -79,10 +79,19 @@ export const saveAiAdminSettings = async (payload) => {
 };
 
 /**
- * Clear same-day backend chat session for the current user/page.
+ * Full reset: chat, feedback, cached analysis, and dataset snapshot for this scope (e.g. model switch).
  */
 export const clearChatSession = async (payload) => {
   const response = await aiApi.post("/chat/clear", payload);
+  return response.data;
+};
+
+/**
+ * Clear chat messages + insight feedback only; keeps cached analysis until Refresh insights.
+ * Matches the Insight panel "Clear memory" button.
+ */
+export const clearAiMemory = async (payload) => {
+  const response = await aiApi.post("/chat/clear-memory", payload);
   return response.data;
 };
 

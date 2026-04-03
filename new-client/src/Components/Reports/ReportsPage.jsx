@@ -1,13 +1,45 @@
-import { useState } from "react";
+import { useMemo, useEffect, useState } from "react";
+import { useLocation, useSearchParams } from "react-router-dom";
 import PageLayout from "../Common/PageLayout";
+import { peekReportJobFromSavedInsightNav } from "../../Utils/globalChatInsightNav";
 import AT_AR_Rules from "../core/DataConsole/Reports/AT_AR_Rules";
 import ReportsSidebar from "./ReportsSidebar";
 import OrginalSource from "../core/DataConsole/Reports/OrginalSource";
 import FileList from "../core/DataConsole/Reports/FileList";
 import { ReportSidebarDrawer } from "../Common/sideDrawer/ReportSidebarDrawer";
 
+const SOURCE_TO_TAB = {
+  "original-source": "Original Source",
+  "by-ar-resource": "By AR Source",
+};
+
 export default function ReportsPage() {
-  const [activeTab, setActiveTab] = useState("Original Source");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
+  const sourceFromUrl = searchParams.get("source");
+
+  const [activeTab, setActiveTab] = useState(
+    () => SOURCE_TO_TAB[sourceFromUrl] || "Original Source",
+  );
+
+  useEffect(() => {
+    const t = SOURCE_TO_TAB[sourceFromUrl];
+    if (t) setActiveTab(t);
+  }, [sourceFromUrl]);
+
+  /**
+   * Job to open after the hub loads: router state from “Go to insight”, else sessionStorage peek (e.g. F5).
+   * Do not call navigate() to clear `location.state` after opening — that replace navigation remounts the route and feels like a full reload.
+   * `openReportInsightJob` in state is harmless; child panels use a ref so the drawer opens only once.
+   */
+  const pendingOpenJobName = useMemo(() => {
+    const fromState = location.state?.openReportInsightJob;
+    if (fromState != null && String(fromState).trim() !== "") {
+      return String(fromState).trim();
+    }
+    if (!sourceFromUrl) return null;
+    return peekReportJobFromSavedInsightNav(sourceFromUrl);
+  }, [location.state, sourceFromUrl]);
   const [editJob, setEditJob] = useState(false);
   const [openDrawer, setOpenDrawer] = useState(null);
   const [drawerMode, setDrawerMode] = useState("detail");
@@ -33,6 +65,9 @@ export default function ReportsPage() {
             isDrawer
             updateData={updateData}
             setUpdateData={setUpdateData}
+            openJobNameFromQuery={
+              sourceFromUrl === "original-source" ? pendingOpenJobName : null
+            }
           />
         );
       case "By AR Source":
@@ -47,6 +82,9 @@ export default function ReportsPage() {
             isDrawer
             updateData={updateData}
             setUpdateData={setUpdateData}
+            openJobNameFromQuery={
+              sourceFromUrl === "by-ar-resource" ? pendingOpenJobName : null
+            }
           />
         );
       case "Create Folder":
@@ -72,6 +110,9 @@ export default function ReportsPage() {
             isDrawer
             updateData={updateData}
             setUpdateData={setUpdateData}
+            openJobNameFromQuery={
+              sourceFromUrl === "by-ar-resource" ? pendingOpenJobName : null
+            }
           />
         );
     }
@@ -89,6 +130,17 @@ export default function ReportsPage() {
       setEditJob(false);
       setOpenDrawer(null);
       setDrawerMode("detail");
+      if (val === "Original Source" || val === "By AR Source") {
+        setSearchParams(
+          (prev) => {
+            const next = new URLSearchParams(prev);
+            if (val === "Original Source") next.set("source", "original-source");
+            else next.set("source", "by-ar-resource");
+            return next;
+          },
+          { replace: true },
+        );
+      }
     }
   };
 

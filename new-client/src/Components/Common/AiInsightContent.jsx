@@ -2664,7 +2664,8 @@ const AiInsightContent = ({
   const pathClean = typeof pathname === "string" ? pathname.split("?")[0].replace(/\/$/, "") : "";
   const isRegisterDetailedRoute =
     typeof pathname === "string" &&
-    (pathClean === "/data-console/register/detailed" ||
+    (pathClean === "/data-console/register" ||
+      pathClean === "/data-console/register/detailed" ||
       pathClean === "data-console/register/detailed" ||
       pathClean.endsWith("/data-console/register/detailed") ||
       /(^|\/)register\/detailed$/.test(pathClean));

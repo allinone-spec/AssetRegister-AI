@@ -25,6 +25,7 @@ import {
   analyzeDataset,
   chatWithData,
   clearChatSession,
+  clearAiMemory,
   submitInsightFeedback,
   invalidateAnalysisCache,
   fetchAiModels,
@@ -592,26 +593,23 @@ const OrginalSource = ({ routeName }) => {
 
   const handleClearInsight = async () => {
     setChatLoading(true);
-    setAiLoading(true);
     setChatHistory([]);
     setChatInput("");
-    setAiResult(null);
-    setAiRequestDebug(null);
-    setAiResponseDebug(null);
     setAiError("");
-    setHiddenInsightIds([]);
-    setQueuedKpiRequests([]);
-    setKpiTitleActions({});
     try {
       clearHiddenInsightIds(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY);
-      await clearChatSession(buildAiPayload());
+      await clearAiMemory(buildAiPayload());
       try {
         sessionStorage.removeItem(aiInsightChatStateKey(user?.id, ORIGINAL_SOURCE_AI_PAGE, ORIGINAL_SOURCE_AI_CATEGORY));
       } catch {
         // noop
       }
-      await handleRunAnalysis();
-      toast.success("Insight memory cleared for this dataset.");
+      setHiddenInsightIds([]);
+      setQueuedKpiRequests([]);
+      setKpiTitleActions({});
+      toast.success(
+        "Chat memory cleared. Cached insights stay until you use Refresh insights.",
+      );
     } catch (error) {
       console.error("AI chat clear error:", error);
       const errBody = error?.response?.data;
@@ -619,9 +617,8 @@ const OrginalSource = ({ routeName }) => {
         errBody?.detail ||
           errBody?.message ||
           error?.message ||
-          "Failed to clear chat session. Please try again.",
+          "Failed to clear chat memory. Please try again.",
       );
-      setAiLoading(false);
     } finally {
       setChatLoading(false);
     }

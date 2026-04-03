@@ -307,6 +307,7 @@ const UserTable = ({
           setFilteredData={setFilteredTableData}
           tableName={tableNameEnum.USER}
           isDrawer={isDrawer}
+          aiSecurityShellPath="/data-console/security/users"
           tableView={view}
           // setOpenDrawer={handleDrawer}
           openDrawerId={openDrawer?.id}

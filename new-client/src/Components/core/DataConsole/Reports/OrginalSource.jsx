@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { setHeadingTitle } from "../../../../redux/Slices/HeadingTitle";
 import { getRequest } from "../../../../Service/Console.service";
@@ -9,7 +9,13 @@ import { setFilters } from "../../../../redux/Slices/AdvancedFilterSlice";
 import GridButton from "../../../Common/GridButton";
 import LoadingBar from "../../../Common/LoadingBar";
 
-const OrginalSource = ({ routeName, setEditJob, setOpenDrawer }) => {
+const OrginalSource = ({
+  routeName,
+  setEditJob,
+  setOpenDrawer,
+  openJobNameFromQuery,
+}) => {
+  const insightJobOpenedRef = useRef(false);
   const { permissionList, permissionDetails } = useSelector(
     (state) => state.permission,
   );
@@ -73,6 +79,24 @@ const OrginalSource = ({ routeName, setEditJob, setOpenDrawer }) => {
       ? data.filter((job) => job?.object == selectedObject)
       : data;
   }, [selectedObject, data]);
+
+  useEffect(() => {
+    insightJobOpenedRef.current = false;
+  }, [openJobNameFromQuery]);
+
+  useEffect(() => {
+    if (!openJobNameFromQuery || !rows?.length || insightJobOpenedRef.current)
+      return;
+    const match = rows.find(
+      (r) =>
+        String(r.jobName || "").trim() === String(openJobNameFromQuery).trim(),
+    );
+    if (match) {
+      insightJobOpenedRef.current = true;
+      setOpenDrawer(match);
+      setEditJob(true);
+    }
+  }, [openJobNameFromQuery, rows, setOpenDrawer, setEditJob]);
 
   const column = rows.length
     ? Object.keys(...rows).map((key) => ({

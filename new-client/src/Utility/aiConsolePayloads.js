@@ -39,6 +39,7 @@ export const buildAdminConsoleOverviewPayload = ({
   category: "admin-console-home",
   filters: buildAdminConsoleOverviewFilters(selectedObject, user, importTrendFilter),
   modelId: selectedModelId || undefined,
+  userName: user?.email || user?.userName || undefined,
 });
 
 export const buildDataConsoleOverviewFilters = (selectedObject, selectedJobName) => ({
@@ -62,4 +63,5 @@ export const buildDataConsoleOverviewPayload = ({
   category: "data-console-home",
   filters: buildDataConsoleOverviewFilters(selectedObject, selectedJobName),
   modelId: selectedModelId || undefined,
+  userName: user?.email || user?.userName || undefined,
 });

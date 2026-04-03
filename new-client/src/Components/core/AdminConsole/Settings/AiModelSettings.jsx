@@ -22,7 +22,16 @@ const splitListText = (text) =>
 
 const listToText = (list) => (Array.isArray(list) ? list.join("\n") : "");
 
-const AiModelSettings = ({ routeName }) => {
+const SettingsContentShell = ({ embedded, routeName, children }) => {
+  if (embedded) {
+    return (
+      <div className="min-h-0 max-h-[calc(90vh-11rem)] overflow-y-auto overflow-x-hidden">{children}</div>
+    );
+  }
+  return <PageLayout routeName={routeName}>{children}</PageLayout>;
+};
+
+const AiModelSettings = ({ routeName, embedded = false }) => {
   const dispatch = useDispatch();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -72,8 +81,8 @@ const AiModelSettings = ({ routeName }) => {
   }, []);
 
   useEffect(() => {
-    dispatch(setHeadingTitle("AI model settings"));
-  }, [dispatch]);
+    dispatch(setHeadingTitle(embedded ? "Settings" : "AI model settings"));
+  }, [dispatch, embedded]);
 
   useEffect(() => {
     load();
@@ -106,16 +115,16 @@ const AiModelSettings = ({ routeName }) => {
 
   if (loading) {
     return (
-      <PageLayout routeName={routeName}>
+      <SettingsContentShell embedded={embedded} routeName={routeName}>
         <div className="flex min-h-[45vh] items-center justify-center">
           <CircularProgress sx={{ color: "var(--accent)" }} />
         </div>
-      </PageLayout>
+      </SettingsContentShell>
     );
   }
 
   return (
-    <PageLayout routeName={routeName}>
+    <SettingsContentShell embedded={embedded} routeName={routeName}>
       <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6">
         <h1 className="text-2xl font-semibold text-text-primary">AI Model</h1>
         <p className="mt-2 text-sm text-text-sub">
@@ -236,7 +245,7 @@ const AiModelSettings = ({ routeName }) => {
           </Button>
         </div>
       </div>
-    </PageLayout>
+    </SettingsContentShell>
   );
 };
 

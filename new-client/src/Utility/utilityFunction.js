@@ -127,6 +127,7 @@ export const getUniqueColumnValueList = async (
   jobName
 ) => {
   switch (pathname) {
+    case "/data-console/register":
     case "/data-console/register/detailed":
       const registerRes = await getCommonRegisterRequest(
         `/AssetRegister/${columnId}/columnValues/${selectedObject}/tableName/getUniqueColumnValues`

@@ -265,6 +265,7 @@ const GroupsTable = ({
           routeName={routeName}
           tableName={tableNameEnum.GROUP}
           isDrawer={isDrawer}
+          aiSecurityShellPath="/data-console/security/groups"
           tableView={view}
           // setOpenDrawer={handleDrawer}
           openDrawerId={openDrawer?.groupId}

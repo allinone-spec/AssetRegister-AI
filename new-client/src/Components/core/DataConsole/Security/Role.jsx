@@ -179,6 +179,7 @@ const RoleTable = ({
           setFilteredData={setFilteredTableData}
           tableName={tableNameEnum.ROLE}
           isDrawer={isDrawer}
+          aiSecurityShellPath="/data-console/security/roles"
           tableView={view}
           // setOpenDrawer={handleDrawer}
           openDrawerId={openDrawer?.roleId}

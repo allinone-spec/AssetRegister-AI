@@ -102,6 +102,7 @@ import {
   analyzeDataset,
   chatWithData,
   clearChatSession,
+  clearAiMemory,
   clearChatThread,
   submitInsightFeedback,
   invalidateAnalysisCache,
@@ -2656,16 +2657,9 @@ const DataTable = ({
       return;
     }
     setChatLoading(true);
-    setAiLoading(true);
     setChatHistory([]);
     setChatInput("");
-    setAiResult(null);
-    setAiRequestDebug(null);
-    setAiResponseDebug(null);
     setAiError("");
-    setHiddenInsightIds([]);
-    setQueuedKpiRequests([]);
-    setKpiTitleActions({});
     try {
       const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
       const category = dashboardData?.tableType || "generic";
@@ -2677,15 +2671,20 @@ const DataTable = ({
         category,
         filters: buildAiFilters(),
         modelId: selectedModelId || undefined,
+        userName: user?.email || user?.userName || undefined,
       };
-      await clearChatSession(payload);
+      await clearAiMemory(payload);
       try {
         sessionStorage.removeItem(aiInsightChatStateKey(user?.id, pageId, category));
       } catch {
         // noop
       }
-      await handleRunAnalysis();
-      toast.success("Insight memory cleared for this dataset.");
+      setHiddenInsightIds([]);
+      setQueuedKpiRequests([]);
+      setKpiTitleActions({});
+      toast.success(
+        "Chat memory cleared. Cached insights stay until you use Refresh insights.",
+      );
     } catch (error) {
       console.error("AI chat clear error:", error);
       const errBody = error?.response?.data;
@@ -2693,9 +2692,8 @@ const DataTable = ({
         errBody?.detail ||
           errBody?.message ||
           error?.message ||
-          "Failed to clear chat session. Please try again.",
+          "Failed to clear chat memory. Please try again.",
       );
-      setAiLoading(false);
     } finally {
       setChatLoading(false);
     }

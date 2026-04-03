@@ -37,7 +37,24 @@ function SectionIcon({ id, className }) {
   return <Cmp className={className} size={20} strokeWidth={1.75} aria-hidden />;
 }
 
-const AiPromptSettings = ({ routeName }) => {
+const SettingsContentShell = ({ embedded, routeName, className, children }) => {
+  if (embedded) {
+    return (
+      <div
+        className={`min-h-0 max-h-[calc(90vh-11rem)] overflow-y-auto overflow-x-hidden ${className || ""}`}
+      >
+        {children}
+      </div>
+    );
+  }
+  return (
+    <PageLayout routeName={routeName} className={className}>
+      {children}
+    </PageLayout>
+  );
+};
+
+const AiPromptSettings = ({ routeName, embedded = false }) => {
   const dispatch = useDispatch();
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -80,8 +97,8 @@ const AiPromptSettings = ({ routeName }) => {
   }, []);
 
   useEffect(() => {
-    dispatch(setHeadingTitle("AI prompt templates"));
-  }, [dispatch]);
+    dispatch(setHeadingTitle(embedded ? "Settings" : "AI prompt templates"));
+  }, [dispatch, embedded]);
 
   useEffect(() => {
     load();
@@ -137,7 +154,11 @@ const AiPromptSettings = ({ routeName }) => {
 
   if (initialLoading) {
     return (
-      <PageLayout routeName={routeName} className="!bg-gradient-to-b from-page-bg to-surface">
+      <SettingsContentShell
+        embedded={embedded}
+        routeName={routeName}
+        className="!bg-gradient-to-b from-page-bg to-surface"
+      >
         <div className="flex min-h-[50vh] flex-col items-center justify-center gap-4 px-6 py-20">
           <CircularProgress size={40} sx={{ color: "var(--accent)" }} />
           <div className="text-center">
@@ -145,12 +166,16 @@ const AiPromptSettings = ({ routeName }) => {
             <p className="mt-1 text-xs text-text-faint">Contacting the AI service…</p>
           </div>
         </div>
-      </PageLayout>
+      </SettingsContentShell>
     );
   }
 
   return (
-    <PageLayout routeName={routeName} className="!bg-gradient-to-b from-page-bg/95 via-surface to-accent-dim/25">
+    <SettingsContentShell
+      embedded={embedded}
+      routeName={routeName}
+      className="!bg-gradient-to-b from-page-bg/95 via-surface to-accent-dim/25"
+    >
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
         {/* Page header */}
         <header className="mb-8 flex flex-col gap-4 border-b border-border-theme pb-8 sm:flex-row sm:items-start sm:justify-between">
@@ -404,7 +429,7 @@ const AiPromptSettings = ({ routeName }) => {
           </div>
         )}
       </div>
-    </PageLayout>
+    </SettingsContentShell>
   );
 };
 

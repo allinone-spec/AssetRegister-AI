@@ -95,6 +95,7 @@ import {
   analyzeDataset,
   chatWithData,
   clearChatSession,
+  clearAiMemory,
   clearChatThread,
   submitInsightFeedback,
   invalidateAnalysisCache,
@@ -110,7 +111,10 @@ import AiInsightContent from "./AiInsightContent";
 import AiChatAssistantMessage from "./AiChatAssistantMessage";
 import { normalizeKpiTitle } from "../../Utils/aiChatKpiExtract";
 import { resolveAiModelSelection } from "../../Utils/resolveAiModelSelection";
-import { consumeGlobalChatInsightNavForRoute } from "../../Utils/globalChatInsightNav";
+import {
+  peekGlobalChatInsightNavForRoute,
+  clearGlobalChatInsightNav,
+} from "../../Utils/globalChatInsightNav";
 import { arPrimaryGradientSx } from "./consoleWelcomeTheme";
 import {
   setSelectedObject,
@@ -283,7 +287,7 @@ const ColumnFilterDropdown = ({
 
     if (filterType === "select" && setSaveFilters)
       switch (pathname) {
-        case "/data-console/register/detailed":
+        case "/data-console/register":
           getCommonRegisterRequest(
             `/AssetRegister/${column?.id}/columnValues/${selectedObject}/tableName/getUniqueColumnValues`,
           )
@@ -922,6 +926,8 @@ const DataTable = ({
   openDrawerId,
   tableView = "table",
   cardNavigateEditHandler,
+  /** When Security hub is `/data-console/Security`, set to the matching @client route (e.g. `/data-console/security/users`) for AI pageId + insights. */
+  aiSecurityShellPath,
 }) => {
   const [tableData, setTableData] = useState(data);
   const [rowSelection, setRowSelection] = useState({});
@@ -1022,6 +1028,7 @@ const DataTable = ({
   const dispatch = useDispatch();
   const { user } = useSelector((state) => state.permission);
   const selectedObject = useSelector((state) => state.selectedObject.value);
+  const selectedObjectName = useSelector((state) => state.selectedObject.valueName);
   // Dropdown states
   const [dropdownState, setDropdownState] = useState({
     isOpen: false,
@@ -1055,6 +1062,8 @@ const DataTable = ({
   const [kpiTitleActions, setKpiTitleActions] = useState({});
   const aiStageTimerRef = useRef(null);
   const aiOpenFlowBusyRef = useRef(false);
+  /** Ignore backdrop/escape closes briefly after auto-open from global chat (focus/stack churn). */
+  const globalInsightCloseShieldUntilRef = useRef(0);
   const aiColumnCandidates = useMemo(
     () =>
       (columns || [])
@@ -1063,16 +1072,82 @@ const DataTable = ({
         .map(String),
     [columns],
   );
+
+  /**
+   * Virtual paths so AI payloads, chat keys, and AiInsightContent match full routes:
+   * - Reports job drawer → …/reports/…/jobs/:jobName
+   * - Register Detailed tab on /data-console/register → …/register/detailed (same as @client standalone route)
+   * - Security hub `/data-console/Security` or `/data-console/security` + left nav tab → …/security/users|… (same as @client)
+   */
+  const aiInsightPathname = useMemo(() => {
+    if (
+      pathname === "/data-console/reports" &&
+      jobName &&
+      (dashboardData?.tableType === "original-source" ||
+        dashboardData?.tableType === "by-ar-resource")
+    ) {
+      const segment =
+        dashboardData.tableType === "original-source"
+          ? "original-source"
+          : "by-ar-resource";
+      return `/data-console/reports/${segment}/jobs/${jobName}`;
+    }
+    if (
+      aiSecurityShellPath &&
+      (pathname === "/data-console/Security" || pathname === "/data-console/security")
+    ) {
+      return aiSecurityShellPath;
+    }
+    if (
+      pathname === "/data-console/register" &&
+      dashboardData?.tableType === "register" &&
+      dashboardData?.objectId != null &&
+      String(dashboardData.objectId).trim() !== ""
+    ) {
+      return "/data-console/register/detailed";
+    }
+    return pathname;
+  }, [pathname, jobName, dashboardData?.tableType, dashboardData?.objectId, aiSecurityShellPath]);
+
+  const aiPageId = useMemo(
+    () =>
+      aiInsightPathname.startsWith("/")
+        ? aiInsightPathname.slice(1)
+        : aiInsightPathname,
+    [aiInsightPathname],
+  );
+
   // const { bgColor, textWhiteColor } = useTheme();
   // const { layoutTextColor, backgroundColor } = bgColor;
   const isGrouped = !saveFilters?.grouping?.length;
+  const isReportsJobDrawerAi =
+    pathname === "/data-console/reports" &&
+    jobName &&
+    (dashboardData?.tableType === "original-source" ||
+      dashboardData?.tableType === "by-ar-resource");
+
+  /** Register “Detailed” on tabbed shell `/data-console/register` (new-client); same grid as @client `/data-console/register/detailed`. */
+  const isRegisterDetailedShellAi =
+    pathname === "/data-console/register" &&
+    dashboardData?.tableType === "register" &&
+    dashboardData?.objectId != null &&
+    String(dashboardData.objectId).trim() !== "";
+
+  /** Tabbed Security hub (new-client); same grids as @client `/data-console/security/users` etc. */
+  const isSecurityShellAi =
+    (pathname === "/data-console/Security" || pathname === "/data-console/security") &&
+    typeof aiSecurityShellPath === "string" &&
+    aiSecurityShellPath.startsWith("/data-console/security/");
+
   const isAiSupportedPage =
     pathname === "/data-console/overview" ||
     pathname === "/data-console/reports/original-source" ||
     pathname.startsWith("/data-console/reports/original-source/jobs/") ||
     pathname === "/data-console/reports/by-ar-resource" ||
     pathname.startsWith("/data-console/reports/by-ar-resource/jobs/") ||
-    pathname === "/data-console/register/detailed" ||
+    isReportsJobDrawerAi ||
+    isRegisterDetailedShellAi ||
+    isSecurityShellAi ||
     pathname === "/data-console/security/users" ||
     pathname === "/data-console/security/groups" ||
     pathname === "/data-console/security/roles" ||
@@ -2294,7 +2369,7 @@ const DataTable = ({
     }
     aiOpenFlowBusyRef.current = true;
     try {
-      const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+      const pageId = aiPageId;
       const category = dashboardData?.tableType || "generic";
       const basePayload = {
         orgId: user?.orgId || "default-org",
@@ -2337,13 +2412,22 @@ const DataTable = ({
     } else {
       objectId = dashOid ?? null;
     }
+    const objectNameForAi =
+      dashboardData?.objectName ||
+      (selectedObjectName && String(selectedObjectName).trim() !== ""
+        ? selectedObjectName
+        : null);
     return {
       tableId,
       viewId,
       jobName: jobName || null,
       objectId,
+      objectName: objectNameForAi,
+      userName: user?.email || user?.userName || null,
       advancedFilters: myData || [],
-      dashboardData,
+      dashboardData: objectNameForAi
+        ? { ...dashboardData, objectName: objectNameForAi }
+        : dashboardData,
       saveFilters: saveFilters || null,
       tableName: tableName || null,
     };
@@ -2479,7 +2563,7 @@ const DataTable = ({
     comment,
   ) => {
     if (!isAiSupportedPage) return;
-    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const pageId = aiPageId;
     const category = dashboardData?.tableType || "generic";
 
     const basePayloadForFeedback = {
@@ -2543,7 +2627,7 @@ const DataTable = ({
 
   const handleChatMessageFeedback = async (message, feedbackType) => {
     if (!isAiSupportedPage || !message?.messageId || !feedbackType) return;
-    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const pageId = aiPageId;
     const category = dashboardData?.tableType || "generic";
     const payload = {
       orgId: user?.orgId || "default-org",
@@ -2576,7 +2660,7 @@ const DataTable = ({
     if (!message?.messageId || message?.addedToInsights) return;
     const raw = String(message?.content || "").trim();
     if (!raw) return;
-    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const pageId = aiPageId;
     const category = dashboardData?.tableType || "generic";
     try {
       await submitInsightFeedback({
@@ -2636,7 +2720,7 @@ const DataTable = ({
 
   useEffect(() => {
     if (!isAiSupportedPage || !aiDialogOpen) return;
-    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const pageId = aiPageId;
     const category = dashboardData?.tableType || "generic";
     const key = aiInsightChatStateKey(user?.id, pageId, category);
     try {
@@ -2661,11 +2745,11 @@ const DataTable = ({
     } catch {
       // Ignore invalid persisted state.
     }
-  }, [aiDialogOpen, isAiSupportedPage, pathname, dashboardData?.tableType, user?.id]);
+  }, [aiDialogOpen, isAiSupportedPage, aiInsightPathname, dashboardData?.tableType, user?.id]);
 
   useEffect(() => {
     if (!isAiSupportedPage) return;
-    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const pageId = aiPageId;
     const category = dashboardData?.tableType || "generic";
     const key = aiInsightChatStateKey(user?.id, pageId, category);
     try {
@@ -2678,7 +2762,7 @@ const DataTable = ({
     } catch {
       // Ignore storage quota errors.
     }
-  }, [chatHistory, isAiSupportedPage, pathname, dashboardData?.tableType, user?.id]);
+  }, [chatHistory, isAiSupportedPage, aiInsightPathname, dashboardData?.tableType, user?.id]);
 
   const handleRunAnalysis = async (optionalCustomPrompt, opts) => {
     if (!isAiSupportedPage) {
@@ -2696,7 +2780,7 @@ const DataTable = ({
       setAiLoading(true);
       setAiError("");
 
-      const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+      const pageId = aiPageId;
 
       const payload = {
         orgId: user?.orgId || "default-org",
@@ -2705,6 +2789,7 @@ const DataTable = ({
         category: dashboardData?.tableType || "generic",
         filters: buildAiFilters(),
         modelId: effectiveModelId || undefined,
+        userName: user?.email || user?.userName || undefined,
         customPrompt:
           (typeof optionalCustomPrompt === "string" ? optionalCustomPrompt : null)?.trim() ||
           undefined,
@@ -2741,46 +2826,65 @@ const DataTable = ({
 
   useEffect(() => {
     if (!isAiSupportedPage) return;
-    const pending = consumeGlobalChatInsightNavForRoute(pathname);
-    if (!pending) return;
-
-    if (pending.objectId != null && String(pending.objectId).trim() !== "") {
-      dispatch(setSelectedObject(String(pending.objectId)));
-      if (pending.objectName)
-        dispatch(setSelectedObjectName(String(pending.objectName)));
-    } else {
-      dispatch(clearSelectedObject());
-      dispatch(setSelectedObjectName(""));
-    }
-
-    const addedFromGlobal = Array.isArray(pending.addedInsights)
-      ? pending.addedInsights.filter((x) => x && x.text)
-      : [];
-    const applyAddedInsights = (base) => {
-      if (!addedFromGlobal.length) return base;
-      const safeBase = base && typeof base === "object" ? base : {};
-      const current = Array.isArray(safeBase.totalInsights)
-        ? safeBase.totalInsights
-        : [];
-      const appended = addedFromGlobal.map((item) => ({
-        title: String(item.title || "Chat insight").slice(0, 100),
-        text: String(item.text || "").slice(0, 1800),
-        severity: String(item.severity || "medium"),
-        source: "chat",
-      }));
-      return { ...safeBase, totalInsights: [...current, ...appended] };
-    };
-    const titles = Array.isArray(pending.kpis) ? pending.kpis.filter(Boolean) : [];
-    const actionMap = buildKpiActionMap(titles);
-    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
-    const category = dashboardData?.tableType || "generic";
-
+    /**
+     * Defer peek+apply to the next macrotask so:
+     * - React 18 Strict Mode’s mount→unmount→remount doesn’t consume sessionStorage before the real mount applies.
+     * - Drawer + router state settle before we read storage.
+     * Peek+clear runs inside the timer so effect cleanup cancels only the timer — storage stays until we successfully apply.
+     */
     const timerId = window.setTimeout(() => {
+      const pending = peekGlobalChatInsightNavForRoute(aiInsightPathname);
+      if (!pending) return;
+      clearGlobalChatInsightNav();
+
+      if (pending.objectId != null && String(pending.objectId).trim() !== "") {
+        dispatch(setSelectedObject(String(pending.objectId)));
+        if (pending.objectName)
+          dispatch(setSelectedObjectName(String(pending.objectName)));
+      } else if (!isReportsJobDrawerAi) {
+        dispatch(clearSelectedObject());
+        dispatch(setSelectedObjectName(""));
+      }
+
+      const addedFromGlobal = Array.isArray(pending.addedInsights)
+        ? pending.addedInsights.filter((x) => x && x.text)
+        : [];
+      const applyAddedInsights = (base) => {
+        if (!addedFromGlobal.length) return base;
+        const safeBase = base && typeof base === "object" ? base : {};
+        const current = Array.isArray(safeBase.totalInsights)
+          ? safeBase.totalInsights
+          : [];
+        const appended = addedFromGlobal.map((item) => ({
+          title: String(item.title || "Chat insight").slice(0, 100),
+          text: String(item.text || "").slice(0, 1800),
+          severity: String(item.severity || "medium"),
+          source: "chat",
+        }));
+        return { ...safeBase, totalInsights: [...current, ...appended] };
+      };
+      const titles = Array.isArray(pending.kpis) ? pending.kpis.filter(Boolean) : [];
+      const actionMap = buildKpiActionMap(titles);
+      const pageId = aiPageId;
+      const category = dashboardData?.tableType || "generic";
+
       const persistedHidden = loadHiddenInsightIds(user?.id, pageId, category);
       setHiddenInsightIds(persistedHidden);
       setQueuedKpiRequests(titles);
       setKpiTitleActions(actionMap);
+      globalInsightCloseShieldUntilRef.current = Date.now() + 800;
       setAiDialogOpen(true);
+
+      const seed = pending.seedAnalysis;
+      if (seed && typeof seed === "object") {
+        let merged = applyKpiActionOverrides({ ...seed }, actionMap);
+        merged = applyAddedInsights(merged);
+        setAiResult(merged);
+        setAiResponseDebug(seed);
+        setAiError("");
+        return;
+      }
+
       if (aiResultRef.current) {
         setAiResult((prev) =>
           applyAddedInsights(applyKpiActionOverrides(prev, actionMap)),
@@ -2795,7 +2899,14 @@ const DataTable = ({
     }, 0);
 
     return () => window.clearTimeout(timerId);
-  }, [pathname, isAiSupportedPage, dispatch, user?.id, dashboardData?.tableType]);
+  }, [
+    aiInsightPathname,
+    isAiSupportedPage,
+    isReportsJobDrawerAi,
+    dispatch,
+    user?.id,
+    dashboardData?.tableType,
+  ]);
 
   const userWantsInsightsRefresh = (text) => {
     const t = (text || "").toLowerCase();
@@ -2809,7 +2920,7 @@ const DataTable = ({
     const lastUserMessage = [...chatHistory]
       .reverse()
       .find((m) => m?.role === "user")?.content;
-    const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+    const pageId = aiPageId;
     const refreshPrompt = composeRefreshPrompt(lastUserMessage);
     const basePayload = {
       orgId: user?.orgId || "default-org",
@@ -2818,6 +2929,7 @@ const DataTable = ({
       category: dashboardData?.tableType || "generic",
       filters: buildAiFilters(),
       modelId: selectedModelId || undefined,
+      userName: user?.email || user?.userName || undefined,
       customPrompt: refreshPrompt,
       focusColumns: aiFocusColumns?.length ? aiFocusColumns : undefined,
     };
@@ -2835,7 +2947,7 @@ const DataTable = ({
 
     try {
       setChatLoading(true);
-      const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+      const pageId = aiPageId;
       const payload = {
         orgId: user?.orgId || "default-org",
         userId: user?.id || "anonymous",
@@ -2844,6 +2956,7 @@ const DataTable = ({
         filters: buildAiFilters(),
         messages: newHistory,
         modelId: selectedModelId || undefined,
+        userName: user?.email || user?.userName || undefined,
         focusColumns: aiFocusColumns?.length ? aiFocusColumns : undefined,
       };
 
@@ -2872,6 +2985,7 @@ const DataTable = ({
           category: dashboardData?.tableType || "generic",
           filters: buildAiFilters(),
           modelId: selectedModelId || undefined,
+          userName: user?.email || user?.userName || undefined,
           customPrompt: refreshPrompt,
           focusColumns: aiFocusColumns?.length ? aiFocusColumns : undefined,
         };
@@ -2906,18 +3020,11 @@ const DataTable = ({
       return;
     }
     setChatLoading(true);
-    setAiLoading(true);
     setChatHistory([]);
     setChatInput("");
-    setAiResult(null);
-    setAiRequestDebug(null);
-    setAiResponseDebug(null);
     setAiError("");
-    setHiddenInsightIds([]);
-    setQueuedKpiRequests([]);
-    setKpiTitleActions({});
     try {
-      const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+      const pageId = aiPageId;
       const category = dashboardData?.tableType || "generic";
       clearHiddenInsightIds(user?.id, pageId, category);
       const payload = {
@@ -2927,15 +3034,20 @@ const DataTable = ({
         category,
         filters: buildAiFilters(),
         modelId: selectedModelId || undefined,
+        userName: user?.email || user?.userName || undefined,
       };
-      await clearChatSession(payload);
+      await clearAiMemory(payload);
       try {
         sessionStorage.removeItem(aiInsightChatStateKey(user?.id, pageId, category));
       } catch {
         // noop
       }
-      await handleRunAnalysis();
-      toast.success("Insight memory cleared for this dataset.");
+      setHiddenInsightIds([]);
+      setQueuedKpiRequests([]);
+      setKpiTitleActions({});
+      toast.success(
+        "Chat memory cleared. Cached insights stay until you use Refresh insights.",
+      );
     } catch (error) {
       console.error("AI chat clear error:", error);
       const errBody = error?.response?.data;
@@ -2943,9 +3055,8 @@ const DataTable = ({
         errBody?.detail ||
           errBody?.message ||
           error?.message ||
-          "Failed to clear chat session. Please try again.",
+          "Failed to clear chat memory. Please try again.",
       );
-      setAiLoading(false);
     } finally {
       setChatLoading(false);
     }
@@ -2968,7 +3079,7 @@ const DataTable = ({
     setQueuedKpiRequests([]);
     setKpiTitleActions({});
     try {
-      const pageId = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+      const pageId = aiPageId;
       const category = dashboardData?.tableType || "generic";
       clearHiddenInsightIds(user?.id, pageId, category);
       const payload = {
@@ -3504,7 +3615,7 @@ const DataTable = ({
             columnFilters={columnFilters}
             setSaveFilters={setSaveFilters}
             jobName={jobName}
-            pathname={pathname}
+            pathname={aiInsightPathname}
             viewId={viewId}
             tableDataSource={
               dashboardData.tableType === "original-source" ? "AC" : "DC"
@@ -3962,7 +4073,16 @@ const DataTable = ({
 
       <Dialog
         open={aiDialogOpen}
-        onClose={() => setAiDialogOpen(false)}
+        onClose={(event, reason) => {
+          if (
+            (reason === "backdropClick" || reason === "escapeKeyDown") &&
+            Date.now() < globalInsightCloseShieldUntilRef.current
+          ) {
+            return;
+          }
+          globalInsightCloseShieldUntilRef.current = 0;
+          setAiDialogOpen(false);
+        }}
         disableEnforceFocus
         fullWidth
         maxWidth="lg"
@@ -4094,7 +4214,7 @@ const DataTable = ({
             {!aiLoading && aiResult && (
               <AiInsightContent
                 aiResult={aiResult}
-                pathname={pathname}
+                pathname={aiInsightPathname}
                 onInsightFeedback={handleInsightFeedback}
                 hiddenInsightIds={hiddenInsightIds}
                 drillDown={aiInsightDrillDown}
@@ -4107,8 +4227,9 @@ const DataTable = ({
               </div>
               <p className="text-xs text-text-faint max-w-2xl leading-relaxed mb-4">
                 Follow-up questions use the same session context as the insights above. Use{" "}
-                <span className="font-medium text-text-sub">Refresh insights</span> above to regenerate analysis, or{" "}
-                <span className="font-medium text-text-sub">Clear memory</span> to reset chat for this session.
+                <span className="font-medium text-text-sub">Refresh insights</span> to re-run analysis and update cached
+                insights, or <span className="font-medium text-text-sub">Clear memory</span> to clear only chat and
+                feedback (insights stay until refresh).
               </p>
               <div className="min-h-[300px] max-h-[380px] overflow-y-auto rounded-xl border border-border-theme bg-gradient-to-b from-page-bg/90 to-surface p-4 mb-3 shadow-inner text-sm [scrollbar-width:thin]">
                 {chatHistory.length === 0 && (
