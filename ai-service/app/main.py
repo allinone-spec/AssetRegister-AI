@@ -33,6 +33,7 @@ from app.storage import AIStateStore, PERSISTENT_AI_DAY_KEY
 
 # Serialize OpenAI HTTP calls: parallel /analyze + chat completions share one key and trip RPM limits.
 _openai_completion_lock = threading.Lock()
+_gemini_completion_lock = threading.Lock()
 _openai_last_call_end_monotonic = 0.0
 _openai_request_timestamps: deque[float] = deque()
 OPENAI_REQUEST_WINDOW_SEC = 60.0
@@ -42,6 +43,8 @@ OPENAI_429_BACKOFF_BUDGET_SEC = 90
 OPENAI_MAX_ATTEMPTS = 5
 OPENAI_MAX_OUTPUT_TOKENS_NON_JSON = 600
 OPENAI_MAX_OUTPUT_TOKENS_JSON = 2200
+GEMINI_MAX_ATTEMPTS = 3
+GEMINI_503_BACKOFF_SEC = 8
 _ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
@@ -1942,10 +1945,12 @@ def _llm_admin_console_highlights(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
-    raw = _llm_chat(eff, model_id, messages, max_tokens=1600, json_mode=True)
     try:
+        raw = _llm_chat(eff, model_id, messages, max_tokens=1600, json_mode=True)
         return _parse_ai_json_with_repair(eff, raw, model_id)
     except Exception:
+        if not _allow_deterministic_llm_fallback(eff, model_id):
+            raise
         return {
             "executiveSummary": "Admin Console metrics were computed; narrative JSON could not be parsed.",
             "moduleStories": [],
@@ -2273,16 +2278,18 @@ def _build_data_console_home_response(
     user = "METRICS:\n" + json.dumps(metrics, indent=2, default=str)
     if fb_context.strip():
         user += "\n\nCONTEXT:\n" + fb_context[:8000]
-    raw = _llm_chat(
-        eff,
-        model_id,
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        max_tokens=1600,
-        json_mode=True,
-    )
     try:
+        raw = _llm_chat(
+            eff,
+            model_id,
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            max_tokens=1600,
+            json_mode=True,
+        )
         highlights = _parse_ai_json_with_repair(eff, raw, model_id)
     except Exception:
+        if not _allow_deterministic_llm_fallback(eff, model_id):
+            raise
         highlights = {
             "executiveSummary": "Data Console metrics computed; narrative unavailable.",
             "maturityNarrative": "",
@@ -2921,14 +2928,57 @@ def _chunk_list(items: List[Dict[str, Any]], chunk_size: int = 50) -> List[List[
     return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
 
 
-def _extract_json_block(content: str) -> Dict[str, Any]:
+def _strip_markdown_json_fences(content: str) -> str:
     text = (content or "").strip()
     if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:].lstrip()
-        if "\n" in text:
-            text = text.split("\n", 1)[1]
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _recover_truncated_json_object(content: str) -> Dict[str, Any]:
+    text = _strip_markdown_json_fences(content)
+    start = text.find("{")
+    if start < 0:
+        raise json.JSONDecodeError("No JSON object start found", text, 0)
+    candidate = text[start:]
+    out: List[str] = []
+    stack: List[str] = []
+    in_string = False
+    escape = False
+    for ch in candidate:
+        out.append(ch)
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in ("}", "]"):
+            if stack and stack[-1] == ch:
+                stack.pop()
+    repaired = "".join(out).rstrip()
+    while repaired and repaired[-1] in (":", ","):
+        repaired = repaired[:-1].rstrip()
+    if in_string:
+        repaired += '"'
+    while repaired.endswith(","):
+        repaired = repaired[:-1].rstrip()
+    repaired += "".join(reversed(stack))
+    repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+    return json.loads(repaired)
+
+
+def _extract_json_block(content: str) -> Dict[str, Any]:
+    text = _strip_markdown_json_fences(content)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -3030,6 +3080,25 @@ def _llm_chat_payload_for_openai(model: str, base_payload: Dict[str, Any], json_
     return out
 
 
+def _is_gemini_retryable_error(exc: Exception) -> bool:
+    msg = str(exc or "").upper()
+    return (
+        "503" in msg
+        or "UNAVAILABLE" in msg
+        or "HIGH DEMAND" in msg
+        or "RESOURCE_EXHAUSTED" in msg
+    )
+
+
+def _allow_deterministic_llm_fallback(settings: Settings, model_id: str) -> bool:
+    try:
+        provider = str((_get_model_config(settings, model_id) or {}).get("provider") or "").strip().lower()
+    except Exception:
+        return True
+    # When the caller explicitly chose Gemini, do not silently substitute a fallback analysis.
+    return provider != "gemini"
+
+
 def _llm_gemini_generate(
     api_key: str,
     model_name: str,
@@ -3038,49 +3107,56 @@ def _llm_gemini_generate(
     json_mode: bool,
 ) -> str:
     from google import genai
-    from google.genai import types
 
     client = genai.Client(api_key=api_key)
-    system_parts: List[str] = []
-    contents: List[Any] = []
+    prompt_parts: List[str] = []
     for m in messages:
         role = (m.get("role") or "user").strip()
-        content = m.get("content") or ""
-        if role == "system":
-            system_parts.append(content)
-        elif role == "user":
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=content)]))
-        elif role == "assistant":
-            contents.append(types.Content(role="model", parts=[types.Part.from_text(text=content)]))
-        else:
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=content)]))
-    if not contents:
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text="")]))
-    sys_instr = "\n\n".join(system_parts) if system_parts else None
-    cap = OPENAI_MAX_OUTPUT_TOKENS_JSON if json_mode else OPENAI_MAX_OUTPUT_TOKENS_NON_JSON
-    try:
-        mt = max(64, min(int(max_tokens), cap))
-    except Exception:
-        mt = cap
-    cfg_kwargs: Dict[str, Any] = {
-        "temperature": 0.2,
-        "max_output_tokens": mt,
-    }
-    if sys_instr:
-        cfg_kwargs["system_instruction"] = sys_instr
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        label = {
+            "system": "SYSTEM",
+            "assistant": "ASSISTANT",
+            "user": "USER",
+        }.get(role, "USER")
+        prompt_parts.append(f"{label}:\n{content}")
     if json_mode:
-        cfg_kwargs["response_mime_type"] = "application/json"
-    config = types.GenerateContentConfig(**cfg_kwargs)
-    response = client.models.generate_content(
-        model=model_name,
-        contents=contents,
-        config=config,
-    )
-    text = getattr(response, "text", None) or ""
-    if json_mode and not (text or "").strip():
-        response = client.models.generate_content(model=model_name, contents=contents, config=config)
+        prompt_parts.append(
+            "SYSTEM:\nReturn valid JSON only. No markdown code fences or explanatory text outside the JSON object."
+        )
+    prompt = "\n\n".join(prompt_parts).strip() or ""
+    request_model = model_name if str(model_name).startswith("models/") else f"models/{model_name}"
+
+    def _generate_once() -> str:
+        response = client.models.generate_content(
+            model=request_model,
+            contents=prompt,
+        )
         text = getattr(response, "text", None) or ""
-    return str(text)
+        if json_mode and not (text or "").strip():
+            response = client.models.generate_content(model=request_model, contents=prompt)
+            text = getattr(response, "text", None) or ""
+        return str(text)
+
+    for attempt in range(GEMINI_MAX_ATTEMPTS):
+        try:
+            return _generate_once()
+        except Exception as exc:
+            if attempt < GEMINI_MAX_ATTEMPTS - 1 and _is_gemini_retryable_error(exc):
+                wait_s = max(1, min(2 ** attempt, 8))
+                try:
+                    print(
+                        f"[AI] Gemini temporarily unavailable; retrying in {wait_s}s "
+                        f"(attempt {attempt + 2}/{GEMINI_MAX_ATTEMPTS}).",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+                time.sleep(wait_s)
+                continue
+            raise
+    return ""
 
 
 def _llm_anthropic_generate(
@@ -3168,7 +3244,8 @@ def _llm_chat(
         model = cfg.get("model") or "gemini-2.5-pro"
         provider_label = "Google Gemini"
         try:
-            return _llm_gemini_generate(str(api_key), str(model), messages, max_tokens, json_mode)
+            with _gemini_completion_lock:
+                return _llm_gemini_generate(str(api_key), str(model), messages, max_tokens, json_mode)
         except HTTPException:
             raise
         except Exception as exc:
@@ -3301,12 +3378,19 @@ def _parse_ai_json_with_repair(settings: Settings, content: str, model_id: str) 
     try:
         return _extract_json_block(content)
     except json.JSONDecodeError:
+        try:
+            return _recover_truncated_json_object(content)
+        except json.JSONDecodeError:
+            pass
         repair_messages = [
             {
                 "role": "system",
                 "content": (
-                    "You repair malformed JSON. Return only valid JSON with the same structure and intent. "
-                    "Do not add markdown, explanations, or comments."
+                    "You repair malformed or truncated JSON. Return only valid JSON and nothing else. "
+                    "If the input is cut off, reconstruct the smallest valid JSON object that preserves the original "
+                    "intent and schema. Keep top-level keys that are recoverable, shorten long prose fields "
+                    "aggressively, prefer fewer complete array items over many partial ones, and ensure all "
+                    "strings/braces/brackets are closed correctly. Do not add markdown, explanations, or comments."
                 ),
             },
             {
@@ -3314,10 +3398,20 @@ def _parse_ai_json_with_repair(settings: Settings, content: str, model_id: str) 
                 "content": f"Repair this malformed JSON and return valid JSON only:\n\n{content}",
             },
         ]
-        repaired = _llm_chat(settings, model_id, repair_messages, max_tokens=1500, json_mode=True)
+        repaired = _llm_chat(
+            settings,
+            model_id,
+            repair_messages,
+            max_tokens=OPENAI_MAX_OUTPUT_TOKENS_JSON,
+            json_mode=True,
+        )
         try:
             return _extract_json_block(repaired)
         except json.JSONDecodeError as exc:
+            try:
+                return _recover_truncated_json_object(repaired)
+            except json.JSONDecodeError:
+                pass
             snippet = (content or "")[:1000]
             raise HTTPException(
                 status_code=502,
@@ -4141,7 +4235,21 @@ def _build_analysis_user_prompt(
         "2. Column-level insights: cover every provided column profile with data quality, distribution, and operational meaning.\n"
         "3. Row-level insights: cover the full row summary plus the anomaly rows in this chunk, explaining operational meaning and next actions.\n"
         "Also provide charts that help frontend pages show the most useful visual summaries instantly.\n"
-        "Provide structured outputs suitable for dashboards."
+        "Provide structured outputs suitable for dashboards.\n\n"
+        "HARD OUTPUT LIMITS:\n"
+        "- Return compact JSON only.\n"
+        "- Keep prose concise: each `text`, `insight`, `description`, or `recommendation` value should usually be 1-3 sentences.\n"
+        "- `totalInsights`: at most 6 items.\n"
+        "- `kpis`: at most 8 items.\n"
+        "- `charts`: at most 4 items.\n"
+        "- `trends`: at most 6 items.\n"
+        "- `risks`: at most 6 items.\n"
+        "- `positives`: at most 6 items.\n"
+        "- `recommendations`: at most 6 items.\n"
+        "- `columnInsights`: at most 12 items, prioritizing the most important columns.\n"
+        "- `rowInsights`: at most 10 items, prioritizing the highest-severity anomalies.\n"
+        "- `analysisSummary` and `maturityScore.comment` must be brief.\n"
+        "- Prefer complete, valid JSON over exhaustive coverage."
     )
     if isinstance(focus_cols, list) and focus_cols:
         base += (
@@ -4179,6 +4287,43 @@ def _build_analysis_user_prompt(
             "Quantify multiTableRegisterIds vs totalRegisterIds; cite multiTableExamples (registerId + connectedTables).\n"
             "Recommend how to resolve ambiguous multi-table links (single source of truth per registerId)."
         )
+    return base
+
+
+def _build_gemini_analysis_user_prompt(
+    summary: Dict[str, Any],
+    anomaly_chunk: List[Dict[str, Any]],
+    chunk_index: int,
+    chunk_total: int,
+    feedback_instructions: Optional[str] = None,
+    import_tracing_context: Optional[str] = None,
+    register_tracing_context: Optional[str] = None,
+) -> str:
+    base = (
+        "Return valid JSON only.\n"
+        "Keep the response very compact and prioritised.\n"
+        "Prefer fewer, high-signal insights over broad coverage.\n"
+        "Use this schema only when useful: "
+        "{totalInsights, risks, recommendations, columnInsights, rowInsights, maturityScore, analysisSummary}.\n"
+        "Do not include charts.\n"
+        "Limits:\n"
+        "- totalInsights: <= 3\n"
+        "- risks: <= 3\n"
+        "- recommendations: <= 3\n"
+        "- columnInsights: <= 4\n"
+        "- rowInsights: <= 4\n"
+        "- Each text field should be 1-2 short sentences.\n\n"
+        "COMPACT DATA SUMMARY:\n"
+        f"{json.dumps(summary, indent=2, default=str)}\n\n"
+        f"TOP ANOMALIES CHUNK {chunk_index}/{chunk_total}:\n"
+        f"{json.dumps(anomaly_chunk, indent=2, default=str)}"
+    )
+    if feedback_instructions:
+        base += "\n\nUSER CONTEXT:\n" + str(feedback_instructions).strip()[:1200]
+    if import_tracing_context:
+        base += "\n\nIMPORT TRACING SUMMARY:\n" + str(import_tracing_context).strip()[:2500]
+    if register_tracing_context:
+        base += "\n\nREGISTER TRACING SUMMARY:\n" + str(register_tracing_context).strip()[:2000]
     return base
 
 
@@ -4373,6 +4518,133 @@ def _build_feedback_instructions(
         "- CHAT: treat recurring user questions and stated goals as signals for what to emphasize next.\n\n"
         + context
     )
+
+
+def _compact_value_for_llm_prompt(value: Any, depth: int = 0) -> Any:
+    """Shrink large preprocessed prompt payloads for providers that are sensitive to context size."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value if len(value) <= 600 else (value[:600] + " ...(truncated)")
+    if depth >= 4:
+        text = json.dumps(value, default=str) if isinstance(value, (dict, list)) else str(value)
+        return text[:600] + (" ...(truncated)" if len(text) > 600 else "")
+    if isinstance(value, list):
+        limit = 8 if depth >= 2 else 12
+        return [_compact_value_for_llm_prompt(item, depth + 1) for item in value[:limit]]
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 24:
+                break
+            out[str(key)] = _compact_value_for_llm_prompt(item, depth + 1)
+        return out
+    text = str(value)
+    return text if len(text) <= 600 else (text[:600] + " ...(truncated)")
+
+
+def _compact_json_text_for_llm_prompt(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return text[:4000] + (" ...(truncated)" if len(text) > 4000 else "")
+    return json.dumps(_compact_value_for_llm_prompt(obj), indent=2, default=str)
+
+
+def _compact_analysis_summary_for_gemini(summary: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    stats = summary.get("statistics") if isinstance(summary.get("statistics"), dict) else {}
+    numeric_summary = summary.get("numeric_summary") if isinstance(summary.get("numeric_summary"), dict) else {}
+    focus_summary = summary.get("focus_column_summary") if isinstance(summary.get("focus_column_summary"), dict) else {}
+    focus_summary_preview = dict(list(focus_summary.items())[:8]) if focus_summary else {}
+    numeric_preview = dict(list(numeric_summary.items())[:8]) if numeric_summary else {}
+    return {
+        "statistics": {
+            "total_rows": stats.get("total_rows"),
+            "total_columns": stats.get("total_columns"),
+            "columns": (stats.get("columns") or [])[:24] if isinstance(stats.get("columns"), list) else [],
+            "missing_cell_rate": stats.get("missing_cell_rate"),
+            "missing_cells": stats.get("missing_cells"),
+            "duplicate_rows": stats.get("duplicate_rows"),
+        },
+        "user_focus_columns": (summary.get("user_focus_columns") or [])[:12],
+        "focus_column_summary": _compact_value_for_llm_prompt(focus_summary_preview),
+        "numeric_summary_preview": _compact_value_for_llm_prompt(numeric_preview),
+        "row_level_summary": _compact_value_for_llm_prompt(summary.get("row_level_summary") or {}),
+        "row_health_summary": _compact_value_for_llm_prompt(summary.get("row_health_summary") or {}),
+    }
+
+
+def _compact_import_tracing_context_for_gemini(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return _compact_json_text_for_llm_prompt(text)
+    if not isinstance(obj, dict):
+        return _compact_json_text_for_llm_prompt(text)
+    deep = obj.get("deepAnalysis") if isinstance(obj.get("deepAnalysis"), dict) else {}
+    examples = deep.get("highImpactExamples") if isinstance(deep.get("highImpactExamples"), list) else []
+    compact_examples: List[Dict[str, Any]] = []
+    for ex in examples[:2]:
+        if not isinstance(ex, dict):
+            continue
+        compact_examples.append(
+            {
+                "numberID": ex.get("numberID"),
+                "TracingStatus": ex.get("TracingStatus"),
+                "acDiffCount": ex.get("acDiffCount"),
+                "dcDiffCount": ex.get("dcDiffCount"),
+                "acChanges": (ex.get("acChanges") or [])[:3],
+                "dcChanges": (ex.get("dcChanges") or [])[:3],
+            }
+        )
+    compact = {
+        "dataSource": obj.get("dataSource"),
+        "filter": obj.get("filter"),
+        "totalRows": obj.get("totalRows"),
+        "statusCounts": obj.get("statusCounts"),
+        "updatedTimeRange": obj.get("updatedTimeRange"),
+        "examples": (obj.get("examples") or [])[:3],
+        "deepAnalysis": {
+            "rowsAnalyzed": deep.get("rowsAnalyzed"),
+            "rowsWithAcJsonDrift": deep.get("rowsWithAcJsonDrift"),
+            "rowsWithDcJsonDrift": deep.get("rowsWithDcJsonDrift"),
+            "acFieldChangeFrequency": dict(list((deep.get("acFieldChangeFrequency") or {}).items())[:8]),
+            "dcFieldChangeFrequency": dict(list((deep.get("dcFieldChangeFrequency") or {}).items())[:8]),
+            "acDcNewMisalignedFields": dict(list((deep.get("acDcNewMisalignedFields") or {}).items())[:8]),
+            "inventoryStatusTransitions": (deep.get("inventoryStatusTransitions") or [])[:6],
+            "tracingStatusVsDrift": dict(list((deep.get("tracingStatusVsDrift") or {}).items())[:6]),
+            "narrativeBullets": (deep.get("narrativeBullets") or [])[:4],
+            "highImpactExamples": compact_examples,
+        },
+    }
+    return json.dumps(_compact_value_for_llm_prompt(compact), indent=2, default=str)
+
+
+def _compact_register_tracing_context_for_gemini(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return _compact_json_text_for_llm_prompt(text)
+    if not isinstance(obj, dict):
+        return _compact_json_text_for_llm_prompt(text)
+    compact = {
+        "compareTableApi": obj.get("compareTableApi"),
+        "totalRows": obj.get("totalRows"),
+        "statusCounts": obj.get("statusCounts"),
+        "narrativeBullets": (obj.get("narrativeBullets") or [])[:4],
+        "multiTableConnection": _compact_value_for_llm_prompt(obj.get("multiTableConnection") or {}),
+        "multiTableExamples": (obj.get("multiTableExamples") or [])[:3],
+        "multiTableRowDetails": (obj.get("multiTableRowDetails") or [])[:3],
+    }
+    return json.dumps(_compact_value_for_llm_prompt(compact), indent=2, default=str)
 
 
 def _status_counts_to_register_categories(status_counts: Dict[str, Any]) -> Dict[str, int]:
@@ -5730,7 +6002,7 @@ def _analysis_from_rows(
     # Token guardrail: for large datasets, anomalies can be huge and blow the context window.
     # We still compute charts/summary from full anomalies, but only send a capped subset to the LLM.
     # Use the same cap/chunking strategy across providers so insight quality does not vary by vendor path.
-    max_anomalies_for_llm = 120
+    max_anomalies_for_llm = 40 if analysis_llm_provider == "gemini" else 120
     anomalies_for_llm: List[Dict[str, Any]] = anomalies
     if len(anomalies) > max_anomalies_for_llm:
         by_issue: Dict[str, List[Dict[str, Any]]] = {}
@@ -5753,9 +6025,40 @@ def _analysis_from_rows(
         custom_prompt, feedback_list or [], chat_messages or [], persistent_user_memory_text or ""
     )
     llm_chunks: List[Dict[str, Any]] = []
-    chunk_size = 50 if len(json.dumps(summary)) < 25000 else 20
+    prompt_summary: Dict[str, Any] = summary
+    prompt_feedback_instructions = feedback_instructions
+    prompt_import_tracing_context = import_tracing_context
+    prompt_register_tracing_context = register_tracing_context
+    if analysis_llm_provider == "gemini":
+        prompt_summary = _compact_analysis_summary_for_gemini(summary)
+        prompt_feedback_instructions = (feedback_instructions or "")[:2000]
+        prompt_import_tracing_context = _compact_import_tracing_context_for_gemini(import_tracing_context)
+        prompt_register_tracing_context = _compact_register_tracing_context_for_gemini(register_tracing_context)
+    chunk_size = 6 if analysis_llm_provider == "gemini" else (50 if len(json.dumps(summary)) < 25000 else 20)
     chunks = _chunk_list(anomalies_for_llm, chunk_size)
     for index, chunk in enumerate(chunks, start=1):
+        prompt_chunk = _compact_value_for_llm_prompt(chunk) if analysis_llm_provider == "gemini" else chunk
+        prompt_user_content = (
+            _build_gemini_analysis_user_prompt(
+                prompt_summary,
+                prompt_chunk,
+                index,
+                len(chunks),
+                prompt_feedback_instructions,
+                import_tracing_context=prompt_import_tracing_context,
+                register_tracing_context=prompt_register_tracing_context,
+            )
+            if analysis_llm_provider == "gemini"
+            else _build_analysis_user_prompt(
+                prompt_summary,
+                prompt_chunk,
+                index,
+                len(chunks),
+                prompt_feedback_instructions,
+                import_tracing_context=prompt_import_tracing_context,
+                register_tracing_context=prompt_register_tracing_context,
+            )
+        )
         messages = [
             {
                 "role": "system",
@@ -5763,22 +6066,37 @@ def _analysis_from_rows(
             },
             {
                 "role": "user",
-                "content": _build_analysis_user_prompt(
-                    summary,
-                    chunk,
-                    index,
-                    len(chunks),
-                    feedback_instructions,
-                    import_tracing_context=import_tracing_context,
-                    register_tracing_context=register_tracing_context,
-                ),
+                "content": prompt_user_content,
             },
         ]
-        chunk_result = _parse_ai_json_with_repair(
-            eff_settings,
-            _llm_chat(eff_settings, model_id, messages, max_tokens=1200, json_mode=True),
-            model_id,
-        )
+        try:
+            raw_chunk = _llm_chat(
+                eff_settings,
+                model_id,
+                messages,
+                max_tokens=(600 if analysis_llm_provider == "gemini" else 1200),
+                json_mode=True,
+            )
+            chunk_result = _parse_ai_json_with_repair(
+                eff_settings,
+                raw_chunk,
+                model_id,
+            )
+        except Exception as exc:
+            if not _allow_deterministic_llm_fallback(eff_settings, model_id):
+                raise
+            # Do not fail the whole analysis when a provider call fails or returns truncated JSON.
+            # We already have deterministic base analysis, so keep the request successful
+            # and let later chunks add value only when they parse cleanly.
+            try:
+                print(
+                    "[AI] chunk LLM step failed; using deterministic fallback "
+                    f"(chunk {index}/{len(chunks)}, model={model_id}): {repr(exc)}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            chunk_result = {}
         llm_chunks.append(chunk_result)
         if analysis_llm_provider in ("openai", "gemini", "anthropic") and index < len(chunks):
             time.sleep(1.2)
@@ -6217,7 +6535,9 @@ def analyze(payload: AnalyzeRequest, request: Request, settings: Settings = Depe
 def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(get_settings)):
     store = get_store()
     chat_model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
-    analysis_model_id = _model_id_or_default(None, settings, purpose="analysis")
+    # Keep chat and analysis/preprocessing on the same explicitly selected model/provider.
+    # Otherwise a Claude chat can still fail inside default Gemini analysis generation.
+    analysis_model_id = _model_id_or_default(payload.modelId, settings, purpose="analysis")
     day_key = PERSISTENT_AI_DAY_KEY
     session_key = _session_dataset_key(payload)
     persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
@@ -6287,7 +6607,8 @@ def chat(payload: ChatRequest, request: Request, settings: Settings = Depends(ge
 def global_chat(payload: GlobalChatRequest, request: Request, settings: Settings = Depends(get_settings)):
     store = get_store()
     chat_model_id = _model_id_or_default(payload.modelId, settings, purpose="chat")
-    analysis_model_id = _model_id_or_default(None, settings, purpose="analysis")
+    # Keep chat and analysis/preprocessing on the same explicitly selected model/provider.
+    analysis_model_id = _model_id_or_default(payload.modelId, settings, purpose="analysis")
     day_key = PERSISTENT_AI_DAY_KEY
     persistent_user_learning = _build_persistent_user_learning_context(store, payload.orgId, payload.userId)
     persistent_user_memory_text = str(persistent_user_learning.get("text") or "")
